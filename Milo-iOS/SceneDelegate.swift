@@ -6,6 +6,7 @@
 //
 
 import UIKit
+import WidgetKit
 
 class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
@@ -37,14 +38,21 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneWillEnterForeground(_ scene: UIScene) {
-        // Called as the scene transitions from the background to the foreground.
-        // Use this method to undo the changes made on entering the background.
+        // Forcer une reconnexion immédiate au retour du background
+        if let vc = window?.rootViewController as? ViewController {
+            vc.handleReturnFromBackground()
+        }
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
-        // Called as the scene transitions from the foreground to the background.
-        // Use this method to save data, release shared resources, and store enough scene-specific state information
-        // to restore the scene back to its current state.
+        // Afficher l'overlay logo pour masquer le contenu dans l'app switcher
+        // et éviter le flash d'erreur au retour
+        if let vc = window?.rootViewController as? ViewController {
+            vc.showReconnectingOverlay()
+        }
+
+        // Rafraîchir le widget pour que le volume soit à jour sur l'écran d'accueil
+        WidgetCenter.shared.reloadAllTimelines()
     }
 
 

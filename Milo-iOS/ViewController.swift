@@ -5,10 +5,11 @@ class ViewController: UIViewController, WKNavigationDelegate {
 
     var webView: WKWebView!
     var errorView: UIView!
+    var reconnectingOverlay: UIView!
     var logoImageView: UIImageView!
     var titleLabel: UILabel!
     var messageLabel: UILabel!
-    
+
     var connectivityTimer: Timer?
     var initialErrorTimer: Timer?
     var isConnected = false
@@ -28,6 +29,7 @@ class ViewController: UIViewController, WKNavigationDelegate {
         containerView.addSubview(webView)
         
         setupErrorView()
+        setupReconnectingOverlay()
     }
     
     func setupErrorView() {
@@ -94,6 +96,45 @@ class ViewController: UIViewController, WKNavigationDelegate {
         ])
     }
 
+    func setupReconnectingOverlay() {
+        reconnectingOverlay = UIView()
+        reconnectingOverlay.backgroundColor = UIColor(red: 0.97, green: 0.97, blue: 0.97, alpha: 1.0)
+        reconnectingOverlay.alpha = 0.0
+        reconnectingOverlay.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(reconnectingOverlay)
+
+        let logo = UIImageView(image: UIImage(named: "Logo"))
+        logo.contentMode = .scaleAspectFit
+        logo.translatesAutoresizingMaskIntoConstraints = false
+        reconnectingOverlay.addSubview(logo)
+
+        NSLayoutConstraint.activate([
+            reconnectingOverlay.topAnchor.constraint(equalTo: view.topAnchor),
+            reconnectingOverlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            reconnectingOverlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            reconnectingOverlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            logo.centerXAnchor.constraint(equalTo: reconnectingOverlay.centerXAnchor),
+            logo.centerYAnchor.constraint(equalTo: reconnectingOverlay.centerYAnchor),
+            logo.widthAnchor.constraint(equalToConstant: 86),
+            logo.heightAnchor.constraint(equalToConstant: 48)
+        ])
+    }
+
+    func showReconnectingOverlay() {
+        reconnectingOverlay.alpha = 1.0
+    }
+
+    func hideReconnectingOverlay() {
+        UIView.animate(withDuration: 0.3) {
+            self.reconnectingOverlay.alpha = 0.0
+        }
+    }
+
+    func handleReturnFromBackground() {
+        tryConnectToMilo()
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         webView.scrollView.contentInsetAdjustmentBehavior = .never
@@ -130,17 +171,25 @@ class ViewController: UIViewController, WKNavigationDelegate {
     
     func checkMiloAndConnect() {
         guard let url = URL(string: "http://milo.local") else { return }
-        
+
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
         request.timeoutInterval = 2.0
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        
+
         URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            // Store resolved IP for the widget
+            if let httpResponse = response as? HTTPURLResponse,
+               let responseURL = httpResponse.url,
+               let host = responseURL.host,
+               host != "milo.local" {
+                UserDefaults(suiteName: "group.leodurand.Milo-iOS")?.set(host, forKey: "milo_ip_address")
+            }
+
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 let isAvailable = error == nil && (response as? HTTPURLResponse)?.statusCode == 200
-                
+
                 if isAvailable && !self.isConnected {
                     // milo.local disponible et on n'est pas connecté → se connecter
                     self.tryConnectToMilo()
@@ -173,19 +222,25 @@ class ViewController: UIViewController, WKNavigationDelegate {
     
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         isConnected = true
-        
+
         // Annuler le timer d'erreur initial (connexion réussie)
         initialErrorTimer?.invalidate()
-        
+
         // Ajouter classe CSS
         webView.evaluateJavaScript("document.body.classList.add('ios-app');", completionHandler: nil)
-        
+
+        // Synchroniser le step volume depuis les settings Milo
+        Task { await MiloAPIClient.syncVolumeStep() }
+
         // Masquer l'erreur et afficher la webview
         hideErrorView()
+        hideReconnectingOverlay()
     }
-    
+
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        // Connexion échouée - garder la vue d'erreur visible
+        // Connexion échouée - masquer l'overlay de reconnexion et afficher l'erreur
+        hideReconnectingOverlay()
+        showErrorView()
     }
 
     override func viewDidLayoutSubviews() {
