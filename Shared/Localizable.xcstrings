@@ -1,0 +1,89 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "Augmente le volume de Milo" : {
+
+    },
+    "Augmenter le volume" : {
+
+    },
+    "Change la source audio de Milo" : {
+
+    },
+    "Changer la source" : {
+
+    },
+    "Contrôlez le volume de Milo." : {
+
+    },
+    "Diminue le volume de Milo" : {
+
+    },
+    "Diminuer le volume" : {
+
+    },
+    "Milo" : {
+
+    },
+    "Milo indisponible" : {
+
+    },
+    "muted" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stumm"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Muted"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Silencio"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Muet"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "म्यूट"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Muto"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mudo"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "静音"
+          }
+        }
+      }
+    },
+    "Source" : {
+
+    }
+  },
+  "version" : "1.0"
+}

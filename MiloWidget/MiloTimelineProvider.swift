@@ -59,6 +59,13 @@ struct MiloTimelineProvider: TimelineProvider {
             let volume = try await MiloAPIClient.getVolume()
             let volumeDB = volume.volume_db ?? -20
 
+            // Garder le cache à jour pour que le premier tap optimiste soit juste
+            UserDefaults(suiteName: MiloAPIClient.appGroupID)?
+                .set(volumeDB, forKey: "last_volume_db")
+
+            // Sync step + limites en background (non bloquant pour la timeline)
+            Task { await MiloAPIClient.syncVolumeSettings() }
+
             return MiloWidgetData(
                 volumeDB: volumeDB,
                 sourceName: "",

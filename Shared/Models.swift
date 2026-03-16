@@ -6,6 +6,16 @@ struct VolumeResponse: Codable {
     let delta_db: Double?
 }
 
+struct VolumeStateData: Codable {
+    let global_volume_db: Double
+    let global_mute: Bool
+}
+
+struct VolumeStateResponse: Codable {
+    let status: String
+    let data: VolumeStateData?
+}
+
 struct AudioStateResponse: Codable {
     let status: String
     let source: String?

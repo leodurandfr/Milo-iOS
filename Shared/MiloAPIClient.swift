@@ -21,8 +21,13 @@ struct MiloAPIClient {
     // MARK: - Volume
 
     static func getVolume() async throws -> VolumeResponse {
-        let data = try await get(path: "/api/volume/")
-        return try JSONDecoder().decode(VolumeResponse.self, from: data)
+        let data = try await get(path: "/api/volume/state")
+        let state = try JSONDecoder().decode(VolumeStateResponse.self, from: data)
+        return VolumeResponse(
+            status: state.status,
+            volume_db: state.data?.global_volume_db,
+            delta_db: nil
+        )
     }
 
     /// Fire-and-forget : lance la requête sans bloquer l'appelant
@@ -53,12 +58,23 @@ struct MiloAPIClient {
         }.resume()
     }
 
-    /// Récupère le step mobile depuis /api/volume/state et le cache dans UserDefaults
-    static func syncVolumeStep() async {
-        guard let data = try? await get(path: "/api/volume/state") else { return }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let step = json["step_mobile_db"] as? Double, step > 0 else { return }
-        UserDefaults(suiteName: appGroupID)?.set(step, forKey: "volume_step_db")
+    /// Synchronise step mobile et limites volume depuis les settings backend
+    static func syncVolumeSettings() async {
+        let defaults = UserDefaults(suiteName: appGroupID)
+
+        if let data = try? await get(path: "/api/settings/volume-steps"),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let config = json["config"] as? [String: Any],
+           let step = config["step_mobile_db"] as? Double, step > 0 {
+            defaults?.set(step, forKey: "volume_step_db")
+        }
+
+        if let data = try? await get(path: "/api/settings/volume-limits"),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let limits = json["limits"] as? [String: Any],
+           let minDB = limits["min_db"] as? Double {
+            defaults?.set(minDB, forKey: "volume_limit_min_db")
+        }
     }
 
     // MARK: - Audio

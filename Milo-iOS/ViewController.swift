@@ -229,8 +229,8 @@ class ViewController: UIViewController, WKNavigationDelegate {
         // Ajouter classe CSS
         webView.evaluateJavaScript("document.body.classList.add('ios-app');", completionHandler: nil)
 
-        // Synchroniser le step volume depuis les settings Milo
-        Task { await MiloAPIClient.syncVolumeStep() }
+        // Synchroniser les settings volume (step + limites) depuis Milo
+        Task { await MiloAPIClient.syncVolumeSettings() }
 
         // Masquer l'erreur et afficher la webview
         hideErrorView()

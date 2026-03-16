@@ -114,7 +114,9 @@ struct MiloWidgetView: View {
 
     private var volumeText: String {
         let db = entry.data.volumeDB
-        if db <= -80 { return "Muet" }
+        let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID)
+        let limitMin = defaults?.double(forKey: "volume_limit_min_db") ?? -80
+        if db <= limitMin { return String(localized: "muted") }
         return "\(Int(db)) dB"
     }
 }
