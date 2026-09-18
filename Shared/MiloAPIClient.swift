@@ -3,12 +3,50 @@ import WidgetKit
 
 enum MiloAPIError: Error {
     case invalidURL
+    /// L'API a répondu mais Milō n'est pas en état de servir la requête
+    case unavailable
 }
 
 struct MiloAPIClient {
 
     static let appGroupID = "group.leodurand.Milo-iOS"
     static let ipAddressKey = "milo_ip_address"
+    static let volumeLimitMinKey = "volume_limit_min_db"
+    static let volumeLimitMaxKey = "volume_limit_max_db"
+    static let lastVolumeKey = "last_volume_db"
+    static let lastInteractionKey = "last_volume_interaction"
+    static let volumeStepKey = "volume_step_db"
+    static let reachableKey = "milo_reachable"
+    static let canControlKey = "milo_can_control_volume"
+    static let mutedKey = "milo_muted"
+    /// Repli si `step_mobile_db` n'a pas encore pu être lu (backend ancien, hors ligne)
+    static let volumeStepFallbackDB = 3.0
+
+    /// `UserDefaults.double(forKey:)` renvoie 0 quand la clé est absente, ce qui rend
+    /// impossible de distinguer « pas encore synchronisé » de « vraie valeur 0 ».
+    /// Cet accesseur passe par `object(forKey:)` pour que le défaut s'applique vraiment.
+    static func sharedDouble(forKey key: String, default defaultValue: Double) -> Double {
+        guard let defaults = UserDefaults(suiteName: appGroupID),
+              let value = defaults.object(forKey: key) as? Double else { return defaultValue }
+        return value
+    }
+
+    static func sharedBool(forKey key: String, default defaultValue: Bool) -> Bool {
+        guard let defaults = UserDefaults(suiteName: appGroupID),
+              let value = defaults.object(forKey: key) as? Bool else { return defaultValue }
+        return value
+    }
+
+    /// Mémorise ce qu'on vient d'apprendre du réseau, pour que le chemin optimiste
+    /// du widget n'ait pas à supposer que Milō est joignable.
+    static func cacheReachability(_ reachable: Bool,
+                                  canControlVolume: Bool? = nil,
+                                  muted: Bool? = nil) {
+        let defaults = UserDefaults(suiteName: appGroupID)
+        defaults?.set(reachable, forKey: reachableKey)
+        if let canControlVolume { defaults?.set(canControlVolume, forKey: canControlKey) }
+        if let muted { defaults?.set(muted, forKey: mutedKey) }
+    }
 
     static func baseURL() -> String {
         if let sharedDefaults = UserDefaults(suiteName: appGroupID),
@@ -20,13 +58,17 @@ struct MiloAPIClient {
 
     // MARK: - Volume
 
-    static func getVolume() async throws -> VolumeResponse {
+    static func getVolume() async throws -> MiloVolumeState {
         let data = try await get(path: "/api/volume/state")
         let state = try JSONDecoder().decode(VolumeStateResponse.self, from: data)
-        return VolumeResponse(
-            status: state.status,
-            volume_db: state.data?.global_volume_db,
-            delta_db: nil
+        // L'API répond toujours en HTTP 200 : l'échec se lit dans `status`, pas dans le code.
+        guard state.status == "success", let payload = state.data else {
+            throw MiloAPIError.unavailable
+        }
+        return MiloVolumeState(
+            volumeDB: payload.global_volume_db,
+            isMuted: payload.global_mute ?? false,
+            canControlVolume: payload.any_volume_control ?? true
         )
     }
 
@@ -45,36 +87,71 @@ struct MiloAPIClient {
         URLSession.shared.dataTask(with: request) { data, _, _ in
             guard let data = data,
                   let response = try? JSONDecoder().decode(VolumeResponse.self, from: data),
-                  let db = response.volume_db else { return }
+                  response.status == "success",
+                  let db = response.volume_db else {
+                cacheReachability(false)
+                return
+            }
             let defaults = UserDefaults(suiteName: appGroupID)
-            defaults?.set(db, forKey: "last_volume_db")
-            defaults?.set(requestTime, forKey: "last_volume_interaction")
+            cacheReachability(true)
+            // Réponse périmée : un tap plus récent a déjà écrit sa valeur optimiste,
+            // l'écraser ferait reculer l'affichage pendant une rafale de taps.
+            guard requestTime >= (defaults?.double(forKey: lastInteractionKey) ?? 0) else { return }
+            defaults?.set(db, forKey: lastVolumeKey)
+            defaults?.set(requestTime, forKey: lastInteractionKey)
             // Debounce 300ms : ne reload que si aucun nouveau tap entre-temps
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
-                if defaults?.double(forKey: "last_volume_interaction") == requestTime {
+                if defaults?.double(forKey: lastInteractionKey) == requestTime {
                     WidgetCenter.shared.reloadAllTimelines()
                 }
             }
         }.resume()
     }
 
-    /// Synchronise step mobile et limites volume depuis les settings backend
+    /// Synchronise limites et pas de volume depuis les settings backend.
+    ///
+    /// `/api/settings/volume-limits` et `/api/settings/volume-steps` sont en écriture
+    /// seule (PUT) : toute la lecture passe par `/api/settings/bulk`, en une requête —
+    /// ce qui convient à un process court comme une extension WidgetKit, incapable de
+    /// maintenir le WebSocket `volume_changed`.
+    ///
+    /// `volume_steps` est récent côté Milō : un backend antérieur répond 200 sans ce
+    /// bloc. Dans ce cas on conserve la dernière valeur connue, ou `volumeStepFallbackDB`.
     static func syncVolumeSettings() async {
+        guard let data = try? await get(path: "/api/settings/bulk"),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return }
+
         let defaults = UserDefaults(suiteName: appGroupID)
 
-        if let data = try? await get(path: "/api/settings/volume-steps"),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let config = json["config"] as? [String: Any],
-           let step = config["step_mobile_db"] as? Double, step > 0 {
-            defaults?.set(step, forKey: "volume_step_db")
+        // Les deux bornes ensemble ou aucune : un cache mi-ancien mi-neuf pourrait
+        // donner min > max, ce qui inverserait le clamp.
+        if let limits = json["volume_limits"] as? [String: Any],
+           let minDB = limits["min_db"] as? Double,
+           let maxDB = limits["max_db"] as? Double,
+           minDB < maxDB {
+            defaults?.set(minDB, forKey: volumeLimitMinKey)
+            defaults?.set(maxDB, forKey: volumeLimitMaxKey)
         }
 
-        if let data = try? await get(path: "/api/settings/volume-limits"),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let limits = json["limits"] as? [String: Any],
-           let minDB = limits["min_db"] as? Double {
-            defaults?.set(minDB, forKey: "volume_limit_min_db")
+        // Absent sur un backend plus ancien : on ne touche alors pas au cache.
+        if let steps = json["volume_steps"] as? [String: Any],
+           let mobileStep = steps["step_mobile_db"] as? Double, mobileStep > 0 {
+            defaults?.set(mobileStep, forKey: volumeStepKey)
         }
+    }
+
+    /// Limites en vigueur, avec repli tant que `/api/settings/bulk` n'a pas répondu
+    static func volumeLimits() -> (min: Double, max: Double) {
+        let lo = sharedDouble(forKey: volumeLimitMinKey, default: -80)
+        let hi = sharedDouble(forKey: volumeLimitMaxKey, default: 0)
+        return lo < hi ? (min: lo, max: hi) : (min: -80, max: 0)
+    }
+
+    /// Pas de volume du widget : `step_mobile_db` s'il a pu être synchronisé, sinon repli
+    static func volumeStep() -> Double {
+        let step = sharedDouble(forKey: volumeStepKey, default: volumeStepFallbackDB)
+        return step > 0 ? step : volumeStepFallbackDB
     }
 
     // MARK: - Audio

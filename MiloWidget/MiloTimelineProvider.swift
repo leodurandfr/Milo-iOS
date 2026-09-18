@@ -28,7 +28,10 @@ struct MiloTimelineProvider: TimelineProvider {
                 entries.append(MiloWidgetEntry(date: .now, data: data, showVolume: false))
             }
 
-            let nextUpdate = Calendar.current.date(byAdding: .minute, value: 15, to: .now)!
+            // Milō injoignable : re-tenter plus tôt pour que le logo se rallume vite
+            // (WidgetKit reste libre d'étaler ces rafraîchissements selon son budget)
+            let refreshMinutes = data.isReady ? 15 : 5
+            let nextUpdate = Calendar.current.date(byAdding: .minute, value: refreshMinutes, to: .now)!
             let timeline = Timeline(entries: entries, policy: .after(nextUpdate))
             completion(timeline)
         }
@@ -36,43 +39,54 @@ struct MiloTimelineProvider: TimelineProvider {
 
     private func hasRecentInteraction() -> Bool {
         guard let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID) else { return false }
-        let timestamp = defaults.double(forKey: "last_volume_interaction")
+        let timestamp = defaults.double(forKey: MiloAPIClient.lastInteractionKey)
         guard timestamp > 0 else { return false }
         return Date().timeIntervalSince1970 - timestamp < 5
     }
 
     private func fetchMiloData() async -> MiloWidgetData {
-        // Pendant les interactions rapides, utiliser directement le cache UserDefaults
-        // pour éviter un appel réseau bloquant à chaque reload de timeline
-        if hasRecentInteraction(),
-           let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID) {
-            let volumeDB = defaults.double(forKey: "last_volume_db")
+        // Pendant les interactions rapides, utiliser le cache UserDefaults pour éviter
+        // un appel réseau bloquant à chaque reload de timeline. On relit l'accessibilité
+        // mémorisée plutôt que de supposer que Milō répond : sinon un tap sur un Milō
+        // éteint rallumerait le logo et afficherait un volume inventé.
+        if hasRecentInteraction() {
             return MiloWidgetData(
-                volumeDB: volumeDB,
+                volumeDB: MiloAPIClient.sharedDouble(forKey: MiloAPIClient.lastVolumeKey, default: -20),
                 sourceName: "",
-                isConnected: true,
+                isConnected: MiloAPIClient.sharedBool(forKey: MiloAPIClient.reachableKey, default: true),
+                canControlVolume: MiloAPIClient.sharedBool(forKey: MiloAPIClient.canControlKey, default: true),
+                isMuted: MiloAPIClient.sharedBool(forKey: MiloAPIClient.mutedKey, default: false),
                 availableSources: []
             )
         }
 
+        // Les deux requêtes partent en parallèle, et la synchro est attendue : une
+        // extension WidgetKit est détruite dès `completion`, un Task non attendu
+        // n'aurait aucune garantie de s'exécuter.
+        async let state = MiloAPIClient.getVolume()
+        async let settings: Void = MiloAPIClient.syncVolumeSettings()
+        await settings
+
         do {
-            let volume = try await MiloAPIClient.getVolume()
-            let volumeDB = volume.volume_db ?? -20
+            let volume = try await state
 
             // Garder le cache à jour pour que le premier tap optimiste soit juste
             UserDefaults(suiteName: MiloAPIClient.appGroupID)?
-                .set(volumeDB, forKey: "last_volume_db")
-
-            // Sync step + limites en background (non bloquant pour la timeline)
-            Task { await MiloAPIClient.syncVolumeSettings() }
+                .set(volume.volumeDB, forKey: MiloAPIClient.lastVolumeKey)
+            MiloAPIClient.cacheReachability(true,
+                                            canControlVolume: volume.canControlVolume,
+                                            muted: volume.isMuted)
 
             return MiloWidgetData(
-                volumeDB: volumeDB,
+                volumeDB: volume.volumeDB,
                 sourceName: "",
                 isConnected: true,
+                canControlVolume: volume.canControlVolume,
+                isMuted: volume.isMuted,
                 availableSources: []
             )
         } catch {
+            MiloAPIClient.cacheReachability(false, canControlVolume: false)
             return .disconnected
         }
     }

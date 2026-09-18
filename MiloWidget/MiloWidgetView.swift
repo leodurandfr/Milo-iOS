@@ -5,6 +5,9 @@ struct MiloWidgetView: View {
     var entry: MiloWidgetEntry
     @Environment(\.colorScheme) private var colorScheme
 
+    /// Opacité du logo tant que Milō n'est pas joignable / pilotable
+    private let dimmedOpacity: Double = 0.3
+
     private var buttonBg: Color {
         colorScheme == .dark
             ? Color(red: 0x2C/255, green: 0x2C/255, blue: 0x2E/255)
@@ -27,16 +30,6 @@ struct MiloWidgetView: View {
     }
 
     var body: some View {
-        if !entry.data.isConnected {
-            disconnectedView
-        } else {
-            connectedView
-        }
-    }
-
-    // MARK: - Connected View
-
-    private var connectedView: some View {
         VStack(spacing: 12) {
             // Logo ou volume — centré dans l'espace restant
             Group {
@@ -52,6 +45,9 @@ struct MiloWidgetView: View {
                         .scaledToFit()
                         .frame(height: 26)
                         .foregroundStyle(textColor)
+                        // Logo atténué tant qu'on ne peut pas réellement agir sur le volume
+                        .opacity(entry.data.isReady ? 1.0 : dimmedOpacity)
+                        .animation(.easeInOut(duration: 0.3), value: entry.data.isReady)
                         .id("logo")
                 }
             }
@@ -94,29 +90,13 @@ struct MiloWidgetView: View {
         .background(bgColor)
     }
 
-    // MARK: - Disconnected View
-
-    private var disconnectedView: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "wifi.slash")
-                .font(.system(size: 24))
-                .foregroundStyle(.secondary)
-            Text("Milo indisponible")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(bgColor)
-    }
-
     // MARK: - Helpers
 
     private var volumeText: String {
-        let db = entry.data.volumeDB
-        let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID)
-        let limitMin = defaults?.double(forKey: "volume_limit_min_db") ?? -80
-        if db <= limitMin { return String(localized: "muted") }
-        return "\(Int(db)) dB"
+        // `global_mute` du backend, et non « au niveau de la limite basse » : les
+        // intents bornent justement le volume à cette limite, ce qui afficherait
+        // « muet » alors que le son passe toujours.
+        if entry.data.isMuted { return String(localized: "muted") }
+        return "\(Int(entry.data.volumeDB)) dB"
     }
 }
