@@ -142,11 +142,19 @@ struct MiloAPIClient {
         }
     }
 
-    /// Limites en vigueur, avec repli tant que `/api/settings/bulk` n'a pas répondu
+    /// Bornes de repli, en vigueur tant que `/api/settings/bulk` n'a pas répondu.
+    ///
+    /// Le repli haut ne doit surtout pas être 0 dB : aucun Milō n'autorise le volume
+    /// jusqu'à 0, si bien qu'un widget non encore synchronisé affichait une valeur
+    /// optimiste que le backend n'appliquerait jamais, puis la voyait reculer à la
+    /// première réponse réseau. Sous-estimer est le seul sens sûr. Mêmes valeurs que
+    /// `VolumeDefaults` côté Milo-Mac, pour que les deux clients se replient pareil.
+    static let volumeLimitFallback = (min: -80.0, max: -21.0)
+
     static func volumeLimits() -> (min: Double, max: Double) {
-        let lo = sharedDouble(forKey: volumeLimitMinKey, default: -80)
-        let hi = sharedDouble(forKey: volumeLimitMaxKey, default: 0)
-        return lo < hi ? (min: lo, max: hi) : (min: -80, max: 0)
+        let lo = sharedDouble(forKey: volumeLimitMinKey, default: volumeLimitFallback.min)
+        let hi = sharedDouble(forKey: volumeLimitMaxKey, default: volumeLimitFallback.max)
+        return lo < hi ? (min: lo, max: hi) : volumeLimitFallback
     }
 
     /// Pas de volume du widget : `step_mobile_db` s'il a pu être synchronisé, sinon repli
@@ -157,9 +165,12 @@ struct MiloAPIClient {
 
     // MARK: - Audio
 
-    static func getAudioState() async throws -> AudioStateResponse {
+    static func getAudioState() async throws -> MiloAudioState {
         let data = try await get(path: "/api/audio/state")
-        return try JSONDecoder().decode(AudioStateResponse.self, from: data)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw MiloAPIError.unavailable
+        }
+        return MiloAudioState(json: json)
     }
 
     static func changeSource(_ name: String) async throws {
@@ -173,18 +184,25 @@ struct MiloAPIClient {
         return try JSONDecoder().decode(DockAppsResponse.self, from: data)
     }
 
-    // MARK: - Private
+    // MARK: - Transport
 
-    private static func get(path: String) async throws -> Data {
+    /// Interne plutôt que `private` : `MiloAPIClient+Media` vit dans un autre fichier et
+    /// `private` est à portée de fichier, même pour une extension du même type.
+    ///
+    /// Le délai par défaut de 3 s est celui du widget, dont le process est tué s'il traîne.
+    /// Les routes de la bibliothèque musicale, elles, interrogent un serveur Subsonic
+    /// derrière le Pi et sont franchement plus lentes ; elles passent un délai plus long.
+    static func get(path: String, timeout: TimeInterval = 3) async throws -> Data {
         guard let url = URL(string: baseURL() + path) else { throw MiloAPIError.invalidURL }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 3
+        request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         let (data, _) = try await URLSession.shared.data(for: request)
         return data
     }
 
-    private static func post(path: String, body: Data? = nil, timeout: TimeInterval = 3) async throws -> Data {
+    @discardableResult
+    static func post(path: String, body: Data? = nil, timeout: TimeInterval = 3) async throws -> Data {
         guard let url = URL(string: baseURL() + path) else { throw MiloAPIError.invalidURL }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -197,4 +215,5 @@ struct MiloAPIClient {
         let (data, _) = try await URLSession.shared.data(for: request)
         return data
     }
+
 }

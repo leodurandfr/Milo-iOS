@@ -1,9 +1,17 @@
 import AppIntents
 import WidgetKit
 
-struct IncreaseVolumeIntent: AppIntent {
-    static var title: LocalizedStringResource = "Augmenter le volume"
-    static var description: IntentDescription = "Augmente le volume de Milo"
+struct DecreaseVolumeIntent: AppIntent {
+    static var title: LocalizedStringResource = "Diminuer le volume"
+    static var description: IntentDescription = "Diminue le volume de Milo"
+
+    /// Hors de l'app Raccourcis, hors de Siri, hors de Spotlight.
+    ///
+    /// Cet intent n'existe que pour le bouton du widget — `Button(intent:)` n'accepte rien
+    /// d'autre qu'un `AppIntent`, il ne peut donc pas être supprimé. `isDiscoverable` le
+    /// rend invisible partout ailleurs : le widget continue de l'exécuter normalement,
+    /// mais il n'apparaît plus comme action à glisser dans un raccourci.
+    static var isDiscoverable = false
 
     func perform() async throws -> some IntentResult {
         let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID)
@@ -35,7 +43,7 @@ struct IncreaseVolumeIntent: AppIntent {
         // Le backend borne le volume : on borne aussi l'affichage optimiste,
         // sinon le widget affiche une valeur que Milō n'appliquera jamais.
         let limits = MiloAPIClient.volumeLimits()
-        let targetDB = min(max(currentDB + effectiveStep, limits.min), limits.max)
+        let targetDB = min(max(currentDB - effectiveStep, limits.min), limits.max)
 
         defaults?.set(targetDB, forKey: MiloAPIClient.lastVolumeKey)
         defaults?.set(Date().timeIntervalSince1970, forKey: MiloAPIClient.lastInteractionKey)
@@ -44,7 +52,7 @@ struct IncreaseVolumeIntent: AppIntent {
         WidgetCenter.shared.reloadAllTimelines()
 
         // Fire-and-forget : envoie le delta au serveur
-        MiloAPIClient.fireAdjustVolume(delta_db: effectiveStep)
+        MiloAPIClient.fireAdjustVolume(delta_db: -effectiveStep)
 
         return .result()
     }

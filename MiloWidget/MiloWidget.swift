@@ -7,7 +7,6 @@ struct MiloWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: MiloTimelineProvider()) { entry in
             MiloWidgetView(entry: entry)
-                .containerBackground(.clear, for: .widget)
         }
         .configurationDisplayName("Milo")
         .description("Contrôlez le volume de Milo.")

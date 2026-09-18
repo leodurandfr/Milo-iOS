@@ -87,7 +87,11 @@ struct MiloWidgetView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(bgColor)
+        // Le fond passe par `containerBackground` et non par `background` : sur
+        // iOS 26+ l'écran d'accueil a deux modes en plus de clair/sombre (teinté
+        // et transparent), et c'est le seul fond que le système sait retirer ou
+        // reteindre. Peint en dur, il laisserait une brique opaque.
+        .containerBackground(for: .widget) { bgColor }
     }
 
     // MARK: - Helpers
