@@ -11,6 +11,7 @@ struct MiloAPIClient {
 
     static let appGroupID = "group.leodurand.Milo-iOS"
     static let ipAddressKey = "milo_ip_address"
+    static let ipResolvedAtKey = "milo_ip_resolved_at"
     static let volumeLimitMinKey = "volume_limit_min_db"
     static let volumeLimitMaxKey = "volume_limit_max_db"
     static let lastVolumeKey = "last_volume_db"

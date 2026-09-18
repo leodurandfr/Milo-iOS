@@ -45,13 +45,16 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
+        guard let vc = window?.rootViewController as? ViewController else { return }
+
         // Afficher l'overlay logo pour masquer le contenu dans l'app switcher
         // et éviter le flash d'erreur au retour
-        if let vc = window?.rootViewController as? ViewController {
-            vc.showReconnectingOverlay()
-        }
+        vc.enterBackground()
 
-        // Rafraîchir le widget pour que le volume soit à jour sur l'écran d'accueil
+        // Rafraîchir le widget pour que le volume soit à jour sur l'écran d'accueil.
+        // Sauté au lancement à froid, où UIKit émet cet évènement avant même le
+        // premier passage au premier plan : réveiller l'extension n'apprendrait rien.
+        guard vc.hasCompletedFirstLoad else { return }
         WidgetCenter.shared.reloadAllTimelines()
     }
 

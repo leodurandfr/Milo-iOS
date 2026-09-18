@@ -12,7 +12,35 @@ class ViewController: UIViewController, WKNavigationDelegate {
 
     var connectivityTimer: Timer?
     var initialErrorTimer: Timer?
-    var isConnected = false
+    var isConnected = false {
+        didSet {
+            guard isConnected != oldValue else { return }
+            scheduleConnectivityCheck()
+        }
+    }
+
+    /// Vrai dès qu'une première navigation a abouti ou échoué. Sert à reconnaître
+    /// le lancement à froid, pendant lequel UIKit émet `sceneDidEnterBackground`
+    /// puis `sceneWillEnterForeground` alors que `viewDidLoad` vient déjà de
+    /// lancer le chargement.
+    private(set) var hasCompletedFirstLoad = false
+
+    /// Date du passage en arrière-plan, pour juger si la page mérite un rechargement
+    private var backgroundedAt: Date?
+
+    /// Cadence du sondage de `milo.local` : espacée quand tout va bien, serrée
+    /// quand on attend le retour de Milō.
+    private let connectedPollInterval: TimeInterval = 15
+    private let disconnectedPollInterval: TimeInterval = 3
+
+    /// En deçà de ce temps passé en arrière-plan, la page est réputée encore valide :
+    /// la recharger perdrait l'état de la SPA (scroll, vue courante) et
+    /// retéléchargerait une vingtaine de sous-ressources pour rien.
+    private let reloadAfterBackgroundInterval: TimeInterval = 30
+
+    /// L'adresse de Milō ne bouge qu'au renouvellement du bail DHCP : inutile de
+    /// relancer une résolution à chaque sondage.
+    private static let ipResolutionInterval: TimeInterval = 300
 
     override func loadView() {
         let containerView = UIView()
@@ -132,7 +160,27 @@ class ViewController: UIViewController, WKNavigationDelegate {
     }
 
     func handleReturnFromBackground() {
+        // Lancement à froid : UIKit émet `sceneDidEnterBackground` puis
+        // `sceneWillEnterForeground` dans la foulée de `viewDidLoad`. Recharger ici
+        // lancerait une seconde navigation qui annulerait la première.
+        guard hasCompletedFirstLoad else { return }
+
+        let awayFor = backgroundedAt.map { Date().timeIntervalSince($0) } ?? .infinity
+        backgroundedAt = nil
+
+        // Absence courte et page toujours affichée : la recharger ferait repartir
+        // la SPA de zéro sans rien apprendre de neuf.
+        if isConnected && awayFor < reloadAfterBackgroundInterval {
+            hideReconnectingOverlay()
+            return
+        }
+
         tryConnectToMilo()
+    }
+
+    func enterBackground() {
+        backgroundedAt = Date()
+        showReconnectingOverlay()
     }
 
     override func viewDidLoad() {
@@ -154,7 +202,7 @@ class ViewController: UIViewController, WKNavigationDelegate {
         }
         
         // Démarrer le monitoring
-        startConnectivityCheck()
+        scheduleConnectivityCheck()
     }
     
     func tryConnectToMilo() {
@@ -162,11 +210,19 @@ class ViewController: UIViewController, WKNavigationDelegate {
         webView.load(URLRequest(url: url))
     }
     
-    func startConnectivityCheck() {
-        // Timer pour vérifier milo.local toutes les 4 secondes
-        connectivityTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
+    /// (Re)programme le sondage de `milo.local` à la cadence de l'état courant.
+    func scheduleConnectivityCheck() {
+        let interval = isConnected ? connectedPollInterval : disconnectedPollInterval
+        guard connectivityTimer?.timeInterval != interval else { return }
+
+        connectivityTimer?.invalidate()
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.checkMiloAndConnect()
         }
+        // `.common` : en mode `.default`, le sondage s'interrompt tant que
+        // l'utilisateur scrolle la webview.
+        RunLoop.main.add(timer, forMode: .common)
+        connectivityTimer = timer
     }
     
     func checkMiloAndConnect() {
@@ -178,21 +234,19 @@ class ViewController: UIViewController, WKNavigationDelegate {
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
 
         URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
-            // Store resolved IP for the widget
-            if let httpResponse = response as? HTTPURLResponse,
-               let responseURL = httpResponse.url,
-               let host = responseURL.host,
-               host != "milo.local" {
-                UserDefaults(suiteName: "group.leodurand.Milo-iOS")?.set(host, forKey: "milo_ip_address")
-            }
+            let isAvailable = error == nil && (response as? HTTPURLResponse)?.statusCode == 200
+
+            // Hors du thread principal : `getaddrinfo` bloque le temps de la résolution.
+            if isAvailable { Self.cacheResolvedIPAddress() }
 
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                let isAvailable = error == nil && (response as? HTTPURLResponse)?.statusCode == 200
 
                 if isAvailable && !self.isConnected {
-                    // milo.local disponible et on n'est pas connecté → se connecter
-                    self.tryConnectToMilo()
+                    // Milō répond sans que sa page soit affichée → (re)charger, sauf si
+                    // une navigation est déjà en vol : la relancer l'annulerait et
+                    // ferait repartir le chargement à chaque sondage.
+                    if !self.webView.isLoading { self.tryConnectToMilo() }
                 } else if !isAvailable && self.isConnected {
                     // milo.local pas disponible mais on était connecté → afficher erreur
                     self.isConnected = false
@@ -202,6 +256,42 @@ class ViewController: UIViewController, WKNavigationDelegate {
         }.resume()
     }
     
+    /// Résout `milo.local` et mémorise l'adresse pour le widget.
+    ///
+    /// `URLSession` ne réécrit pas l'URL de la réponse avec l'adresse résolue :
+    /// `httpResponse.url?.host` valait toujours « milo.local », si bien que la clé
+    /// partagée restait vide et que l'extension WidgetKit refaisait une résolution
+    /// mDNS à chaque réveil — lente, et fragile dans son budget d'exécution.
+    ///
+    /// Bloquant : à n'appeler que hors du thread principal.
+    private static func cacheResolvedIPAddress() {
+        guard let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID) else { return }
+
+        let hasCachedIP = defaults.string(forKey: MiloAPIClient.ipAddressKey)?.isEmpty == false
+        let resolvedAt = defaults.object(forKey: MiloAPIClient.ipResolvedAtKey) as? Double ?? 0
+        if hasCachedIP, Date().timeIntervalSince1970 - resolvedAt < ipResolutionInterval { return }
+
+        var hints = addrinfo()
+        hints.ai_family = AF_INET
+        hints.ai_socktype = SOCK_STREAM
+
+        var info: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo("milo.local", nil, &hints, &info) == 0, let first = info else { return }
+        defer { freeaddrinfo(info) }
+
+        var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        guard getnameinfo(first.pointee.ai_addr,
+                          first.pointee.ai_addrlen,
+                          &buffer, socklen_t(buffer.count),
+                          nil, 0, NI_NUMERICHOST) == 0 else { return }
+
+        let ip = String(cString: buffer)
+        guard !ip.isEmpty else { return }
+
+        defaults.set(ip, forKey: MiloAPIClient.ipAddressKey)
+        defaults.set(Date().timeIntervalSince1970, forKey: MiloAPIClient.ipResolvedAtKey)
+    }
+
     func showErrorView() {
         // Afficher la vue d'erreur avec animation
         UIView.animate(withDuration: 0.3) {
@@ -221,6 +311,7 @@ class ViewController: UIViewController, WKNavigationDelegate {
     // MARK: - WKNavigationDelegate
     
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        hasCompletedFirstLoad = true
         isConnected = true
 
         // Annuler le timer d'erreur initial (connexion réussie)
@@ -238,6 +329,18 @@ class ViewController: UIViewController, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        // Navigation remplacée par une autre : ce n'est pas un échec de Milō, et la
+        // traiter comme tel ferait clignoter l'écran d'erreur.
+        if (error as NSError).code == NSURLErrorCancelled { return }
+
+        hasCompletedFirstLoad = true
+
+        // Sans cette remise à zéro, `checkMiloAndConnect` ne retentait jamais après
+        // un échec survenu alors qu'on était connecté : sa condition de reconnexion
+        // exige `!isConnected`, et l'app restait sur l'écran d'erreur bien que Milō
+        // réponde.
+        isConnected = false
+
         // Connexion échouée - masquer l'overlay de reconnexion et afficher l'erreur
         hideReconnectingOverlay()
         showErrorView()
