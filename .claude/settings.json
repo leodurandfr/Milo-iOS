@@ -1,5 +1,8 @@
 {
   "permissions": {
+    "allow": [
+      "Bash(/usr/bin/log show *)"
+    ],
     "additionalDirectories": [
       "/private/tmp"
     ]
