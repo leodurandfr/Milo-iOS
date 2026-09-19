@@ -279,27 +279,28 @@ extension MiloAPIClient {
             deviceCount: deviceCount)
     }
 
-    /// Le volume global que vise un geste, ou `nil` si ce n'en est pas un.
+    /// Le volume global que vise un geste, ou `nil` s'il n'y a rien à viser.
     ///
-    /// **La conversion est le cœur du sujet.** Nos 0…1 sont une position sur une
-    /// règle graduée en dB, pas une intensité sonore ; le système, lui, croit
-    /// multiplier un gain. Appliquer son ×1,9 à la position donnait +18,9 dB,
-    /// et — pire — un écart qui dépend de l'endroit d'où l'on part : le même
-    /// geste vaut +37,8 dB une octave plus haut. Lu comme un gain,
-    /// `20·log₁₀(1,9)`, il vaut +5,6 dB partout. Un geste donné produit toujours
-    /// le même écart, ce qui est la seule propriété qu'un curseur doive avoir.
+    /// **On applique le niveau demandé, pas un dérivé de son facteur.** Le
+    /// système envoie bien un facteur commun — ×1,535 sur les trois enceintes le
+    /// 20/09/2026 — mais ce facteur porte des niveaux absolus, et ce sont eux qui
+    /// décrivent où le doigt a laissé la poignée. Les relire comme un gain,
+    /// `20·log₁₀(k)`, produisait 33 % là où le système en demandait 43 : le son
+    /// suivait le doigt de trois fois trop peu, et l'écart se creusait à chaque
+    /// geste puisque le geste suivant repartait de notre valeur écrasée. Les
+    /// extrémités devenaient inatteignables par construction.
     ///
-    /// Le global de Milō est la moyenne des clients — vérifié contre
-    /// `/api/volume/state` — et `set_volume_db` décale ensuite tout le monde du
-    /// même delta, sous `_volume_lock`. C'est ce qui préserve l'équilibre entre
-    /// les pièces, que trois écritures absolues indépendantes écartaient un peu
-    /// plus à chaque geste : 0,58 dB d'écart avant, 1,10 dB après un seul.
-    static func globalTarget(baseDBs: [Double], ratio: Double,
+    /// La moyenne, et non les trois valeurs séparément : le global de Milō **est**
+    /// la moyenne des clients — vérifié contre `/api/volume/state` — et
+    /// `set_volume_db` décale ensuite tout le monde du même delta, sous
+    /// `_volume_lock`. On garde donc le niveau voulu **et** l'équilibre entre les
+    /// pièces, que le facteur du système écartait un peu plus à chaque geste :
+    /// 0,58 dB d'écart avant, 1,10 dB après un seul.
+    static func globalTarget(targetDBs: [Double],
                              limits: (min: Double, max: Double)) -> Double? {
-        guard !baseDBs.isEmpty, ratio > 0 else { return nil }
-        let mean = baseDBs.reduce(0, +) / Double(baseDBs.count)
-        let delta = 20 * log10(ratio)
-        return min(max(mean + delta, limits.min), limits.max)
+        guard !targetDBs.isEmpty else { return nil }
+        let mean = targetDBs.reduce(0, +) / Double(targetDBs.count)
+        return min(max(mean, limits.min), limits.max)
     }
 
     /// Les rapports décrivent-ils un seul geste sur le curseur global ?
@@ -490,9 +491,7 @@ private actor VolumeGesture {
         if MiloAPIClient.isGlobalGesture(ratios: ratios,
                                          touched: entries.count,
                                          deviceCount: deviceCount),
-           let mean = ratios.isEmpty ? nil : ratios.reduce(0, +) / Double(ratios.count),
-           let target = MiloAPIClient.globalTarget(baseDBs: entries.values.map(\.baseDB),
-                                                   ratio: mean,
+           let target = MiloAPIClient.globalTarget(targetDBs: entries.values.map(\.targetDB),
                                                    limits: limits) {
             // Les valeurs optimistes doivent décrire ce qu'on **applique**, pas
             // ce que le système a demandé : les deux diffèrent désormais, et
@@ -501,8 +500,7 @@ private actor VolumeGesture {
             for (mac, entry) in entries {
                 MiloAPIClient.noteOptimistic(mac: mac, db: entry.baseDB + delta)
             }
-            MiloAPIClient.trace?("geste global ×\((mean * 1000).rounded() / 1000) "
-                                 + "→ \((target * 10).rounded() / 10) dB "
+            MiloAPIClient.trace?("geste global → \((target * 10).rounded() / 10) dB "
                                  + "(\(entries.count) enceintes)")
             await MiloAPIClient.writeGlobalVolume(db: target)
             return

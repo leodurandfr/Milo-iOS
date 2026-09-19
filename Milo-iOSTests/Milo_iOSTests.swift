@@ -4,60 +4,43 @@ import Foundation
 
 /// Ce que le curseur global du Centre de contrôle demande, et ce qu'on en fait.
 ///
-/// Le système ne pose pas un niveau : il multiplie les nôtres par un facteur
-/// commun. Ces tests figent la traduction de ce facteur, parce que c'est elle
-/// qui décide de ce qu'on entend — et parce qu'elle ne se vérifie pas au doigt
-/// sans un vrai iPhone et un vrai geste.
+/// Le système envoie un facteur commun sur toutes les enceintes, mais ce facteur
+/// porte des niveaux absolus : ce sont eux qui disent où le doigt a laissé la
+/// poignée. Ces tests figent ça, parce que la relecture du facteur comme un gain
+/// a été essayée le 20/09/2026 et rendait les extrémités inatteignables.
 struct VolumeGestureTests {
 
     let limits = (min: -78.0, max: -8.0)
 
-    @Test("Le facteur se lit comme un gain, pas comme une position")
-    func ratioIsReadAsGain() throws {
-        // Mesuré le 20/09/2026 : trois enceintes vers -57 dB, le système envoie
-        // ×1,9. Lu sur l'échelle en dB ça vaudrait +18,9 dB ; lu comme un gain,
-        // 20·log₁₀(1,9) = +5,58 dB.
-        let bases = [-57.336, -56.331, -57.439]
-        let mean = bases.reduce(0, +) / 3
+    @Test("On applique le niveau demandé, pas un dérivé du facteur")
+    func targetIsTheRequestedLevel() throws {
+        // Mesuré : le système demande 0.4265 / 0.4300 / 0.4342, soit -47,9 dB
+        // en moyenne sur une plage -78…-8. La lecture en gain donnait -54,7.
+        let asked = [0.4264775, 0.4300078, 0.43415198].map { -78 + $0 * 70 }
 
-        let target = try #require(
-            MiloAPIClient.globalTarget(baseDBs: bases, ratio: 1.9, limits: limits))
+        let target = try #require(MiloAPIClient.globalTarget(targetDBs: asked, limits: limits))
 
-        #expect(abs((target - mean) - 5.575) < 0.01)
+        #expect(abs(target - (-47.885)) < 0.01)
     }
 
-    @Test("Le même geste vaut le même écart, où qu'on parte")
-    func deltaIsIndependentOfStartingPoint() throws {
-        // C'est la propriété qui justifie le choix : sur l'échelle en dB, le
-        // même ×1,9 valait +18,9 dB en bas et +37,8 dB une octave plus haut.
-        let low = try #require(MiloAPIClient.globalTarget(baseDBs: [-60], ratio: 1.9, limits: limits))
-        let high = try #require(MiloAPIClient.globalTarget(baseDBs: [-30], ratio: 1.9, limits: limits))
+    @Test("Les extrémités sont atteignables")
+    func extremesAreReachable() throws {
+        let top = try #require(MiloAPIClient.globalTarget(targetDBs: [-8, -8, -8], limits: limits))
+        let bottom = try #require(MiloAPIClient.globalTarget(targetDBs: [-78, -78, -78], limits: limits))
 
-        #expect(abs((low + 60) - (high + 30)) < 0.001)
+        #expect(top == limits.max)
+        #expect(bottom == limits.min)
     }
 
-    @Test("Aller et retour revient au point de départ")
-    func gestureIsReversible() throws {
-        let start = -50.0
-        let up = try #require(MiloAPIClient.globalTarget(baseDBs: [start], ratio: 1.9, limits: limits))
-        let back = try #require(MiloAPIClient.globalTarget(baseDBs: [up], ratio: 1 / 1.9, limits: limits))
-
-        #expect(abs(back - start) < 0.001)
-    }
-
-    @Test("Les bornes de l'opérateur s'appliquent")
+    @Test("Hors bornes, on borne")
     func targetIsClamped() throws {
-        let tooLoud = try #require(MiloAPIClient.globalTarget(baseDBs: [-20], ratio: 100, limits: limits))
-        let tooQuiet = try #require(MiloAPIClient.globalTarget(baseDBs: [-70], ratio: 0.001, limits: limits))
-
-        #expect(tooLoud == limits.max)
-        #expect(tooQuiet == limits.min)
+        #expect(try #require(MiloAPIClient.globalTarget(targetDBs: [0], limits: limits)) == limits.max)
+        #expect(try #require(MiloAPIClient.globalTarget(targetDBs: [-200], limits: limits)) == limits.min)
     }
 
-    @Test("Un facteur nul ou négatif n'est pas un geste")
-    func nonPositiveRatioIsRejected() {
-        #expect(MiloAPIClient.globalTarget(baseDBs: [-50], ratio: 0, limits: limits) == nil)
-        #expect(MiloAPIClient.globalTarget(baseDBs: [], ratio: 1.9, limits: limits) == nil)
+    @Test("Sans enceinte, rien à viser")
+    func emptyIsRejected() {
+        #expect(MiloAPIClient.globalTarget(targetDBs: [], limits: limits) == nil)
     }
 
     @Test("Trois rapports concordants sur trois enceintes : geste global")
