@@ -26,6 +26,52 @@ enum MiloNowPlayingBridge {
     /// Ce qui, dans les attributs, change réellement ce qui est affiché.
     private static var lastSignature = ""
 
+    /// Dernière position connue, l'instant qu'elle décrivait, et si ça jouait.
+    /// Sert uniquement à `positionJumped(_:)`.
+    private static var lastElapsed: TimeInterval?
+    private static var lastCapturedAt = Date.distantPast
+    private static var lastWasPlaying = false
+
+    /// Au-delà de trois secondes, l'écart ne s'explique plus par le temps qui
+    /// passe ni par la gigue du réseau.
+    private static let seekTolerance: TimeInterval = 3
+
+    /// La position a-t-elle bougé autrement qu'en avançant toute seule ?
+    ///
+    /// La position est exclue de `displaySignature`, et c'est justifié : elle
+    /// change en permanence, et l'annoncer à chaque passe ferait reconstruire la
+    /// session toutes les deux secondes pour ne rien dire de neuf.
+    ///
+    /// Mais un `seek` fait **ailleurs** — depuis l'app, l'écran de Milō, un
+    /// autre client — la déplace d'un coup sans toucher à aucun autre champ.
+    /// Rien ne l'annonçait, et la tête de lecture continuait d'interpoler depuis
+    /// un horodatage périmé jusqu'au changement de piste. On compare donc la
+    /// position reçue à celle qu'on extrapolait.
+    ///
+    /// **Met à jour son propre état de suivi** : à appeler exactement une fois
+    /// par passe, et avant toute sortie anticipée.
+    private static func positionJumped(_ a: MiloSessionAttributes) -> Bool {
+        defer {
+            lastElapsed = a.elapsedTime
+            lastCapturedAt = a.capturedAt
+            lastWasPlaying = a.isPlaying
+        }
+        guard let previous = lastElapsed else { return false }
+
+        // Un flux n'a pas de tête de lecture : `duration` y vaut 0 et
+        // `elapsedTime` reste à zéro pour toujours. L'extrapolation, elle,
+        // continue d'avancer — si bien que toute passe un peu espacée
+        // (arrière-plan, réseau lent) serait lue comme un saut et
+        // reconstruirait la session pour rien, exactement ce que la signature
+        // est là pour éviter. Rien à comparer, donc rien à annoncer.
+        guard (a.currentTrack?.duration ?? 0) > 0 else { return false }
+
+        // À l'arrêt, rien ne doit avoir avancé. Une bascule lecture/pause change
+        // déjà la signature, donc elle pousse de toute façon.
+        let advance = lastWasPlaying ? a.capturedAt.timeIntervalSince(lastCapturedAt) : 0
+        return abs(a.elapsedTime - (previous + advance)) > seekTolerance
+    }
+
     private static func displaySignature(_ a: MiloSessionAttributes) -> String {
         let track = a.currentTrack
         let speakers = a.devices
@@ -51,9 +97,27 @@ enum MiloNowPlayingBridge {
     /// Milō ; cette boucle est ce qui tient pendant que l'app est ouverte, et
     /// elle s'arrête dès qu'elle ne l'est plus — interroger Milō toutes les deux
     /// secondes depuis l'arrière-plan ne servirait qu'à vider la batterie.
+    ///
+    /// `startPump` part de **deux** endroits — `didFinishLaunching` et
+    /// `sceneDidBecomeActive` — et les deux se suivent de près au démarrage à
+    /// froid. Annuler la boucle précédente ne suffit pas : l'annulation n'arrête
+    /// pas un `refresh()` déjà engagé au-delà de ses `await`, si bien que deux
+    /// passes pouvaient se chevaucher — deux `RemoteMediaSession.start`
+    /// concurrents, ou un balayage des sessions résiduelles qui ferme celle que
+    /// l'autre venait tout juste de stocker.
+    ///
+    /// La nouvelle boucle attend donc que l'ancienne ait vraiment rendu la main
+    /// avant de commencer. `refresh()` n'est jamais réentrant.
     static func startPump() {
-        pump?.cancel()
+        let previous = pump
+        // Annulée ici, de façon synchrone, et pas depuis la nouvelle tâche : un
+        // `stopPump()` immédiat annulerait celle-ci avant qu'elle n'exécute sa
+        // première ligne, et l'ancienne boucle tournerait alors pour toujours.
+        previous?.cancel()
+
         pump = Task {
+            await previous?.value
+
             while !Task.isCancelled {
                 await refresh()
                 try? await Task.sleep(for: .seconds(2))
@@ -63,7 +127,12 @@ enum MiloNowPlayingBridge {
 
     static func stopPump() {
         pump?.cancel()
-        pump = nil
+        // `pump` n'est **pas** remis à nil : c'est la référence dont le prochain
+        // `startPump` a besoin pour attendre que cette boucle-ci ait vraiment
+        // rendu la main. L'oublier ici rouvrait la fenêtre de chevauchement à
+        // chaque aller-retour arrière-plan → premier plan, qui est de loin le
+        // chemin le plus fréquent — bien plus que le double départ au lancement.
+        // Une tâche terminée ne coûte que sa référence.
     }
 
     static func refresh() async {
@@ -83,12 +152,27 @@ enum MiloNowPlayingBridge {
         // en permanence, et `MediaPlaybackSnapshot` porte déjà un horodatage à
         // partir duquel le système interpole. L'annoncer à chaque seconde ne
         // dirait rien de plus et coûterait tout.
+        // `positionJumped` met à jour son propre suivi : l'appeler une fois par
+        // passe, avant toute sortie anticipée.
+        let jumped = positionJumped(attributes)
         let signature = displaySignature(attributes)
-        if session != nil, signature == lastSignature { return }
+        if session != nil, signature == lastSignature, !jumped { return }
 
         do {
             if let session {
-                try await session.update(attributes)
+                do {
+                    try await session.update(attributes)
+                } catch {
+                    // Une session que Milō ou le système a close continue de
+                    // refuser chaque `update`. La garder rendait la branche
+                    // `start` inatteignable pour toujours : l'écran verrouillé
+                    // restait vide jusqu'au prochain lancement de l'app. On la
+                    // lâche, et la passe suivante en rouvre une.
+                    Self.session = nil
+                    lastSignature = ""
+                    note("update refusé, session lâchée : \(error)")
+                    return
+                }
                 lastSignature = signature
                 note("update ok (\(attributes.id))")
             } else {
