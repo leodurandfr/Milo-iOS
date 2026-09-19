@@ -58,10 +58,11 @@ extension MiloAPIClient {
         let clamped = min(max(Double(level), 0), 1)
         let db = limits.min + clamped * (limits.max - limits.min)
 
-        // Le MAC voyage dans le chemin : `:` doit être échappé.
-        let encoded = mac.addingPercentEncoding(
-            withAllowedCharacters: .alphanumerics) ?? mac
-        guard let url = URL(string: baseURL() + "/api/volume/client/mac/\(encoded)")
+        // La route veut douze caractères hex, sans séparateurs — d'où son
+        // paramètre `mac_url`. Échapper les `:` en `%3A` donne un 400 « Expected
+        // 12 hex characters », mesuré ; on les retire donc plutôt.
+        let plain = mac.replacingOccurrences(of: ":", with: "")
+        guard let url = URL(string: baseURL() + "/api/volume/client/mac/\(plain)")
         else { return }
 
         var request = URLRequest(url: url)
@@ -70,6 +71,16 @@ extension MiloAPIClient {
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["volume_db": db])
-        _ = try? await URLSession.shared.data(for: request)
+
+        // Le code est lu, contrairement aux commandes de transport. La route
+        // répond 400 hors des bornes au lieu de borner, et un curseur qui revient
+        // en place sans rien dire est précisément comment l'encodage du MAC est
+        // resté invisible. La trace est consultable dans l'app group.
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return }
+        if http.statusCode != 200 {
+            UserDefaults(suiteName: appGroupID)?
+                .set("volume \(plain) -> HTTP \(http.statusCode)", forKey: "milo_volume_write_error")
+        }
     }
 }

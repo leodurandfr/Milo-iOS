@@ -28,6 +28,8 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneDidBecomeActive(_ scene: UIScene) {
+        // La session ne se tient à jour que pendant que l'app est ouverte.
+        if #available(iOS 27.0, *) { MiloNowPlayingBridge.startPump() }
         // Called when the scene has moved from an inactive state to an active state.
         // Use this method to restart any tasks that were paused (or not yet started) when the scene was inactive.
     }
@@ -45,6 +47,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
+        if #available(iOS 27.0, *) { MiloNowPlayingBridge.stopPump() }
         guard let vc = window?.rootViewController as? ViewController else { return }
 
         // Afficher l'overlay logo pour masquer le contenu dans l'app switcher

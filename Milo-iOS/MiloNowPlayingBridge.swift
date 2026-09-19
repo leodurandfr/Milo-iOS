@@ -21,6 +21,31 @@ enum MiloNowPlayingBridge {
     /// Sans elle, un `start` refusé est indiscernable d'un `start` jamais tenté.
     private static let statusKey = "milo_nowplaying_status"
 
+    private static var pump: Task<Void, Never>?
+
+    /// Entretient la session tant que l'app est au premier plan.
+    ///
+    /// Sans ça, la session gardait ce qui était vrai au lancement : on voyait
+    /// encore la piste Spotify d'avant pendant que la bibliothèque musicale
+    /// jouait. Le vrai entretien, à terme, ce sont les `update` poussés par
+    /// Milō ; cette boucle est ce qui tient pendant que l'app est ouverte, et
+    /// elle s'arrête dès qu'elle ne l'est plus — interroger Milō toutes les deux
+    /// secondes depuis l'arrière-plan ne servirait qu'à vider la batterie.
+    static func startPump() {
+        pump?.cancel()
+        pump = Task {
+            while !Task.isCancelled {
+                await refresh()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    static func stopPump() {
+        pump?.cancel()
+        pump = nil
+    }
+
     static func refresh() async {
         guard let attributes = await buildAttributes() else {
             note("pas d'état exploitable depuis Milō")
@@ -93,37 +118,41 @@ enum MiloNowPlayingBridge {
 
     private static let sessionID = UUID().uuidString
 
-    /// Un device par client snapcast.
+    /// Un device par client snapcast, avec son vrai nom.
     ///
-    /// `/api/volume/state` ne nomme pas les clients — seules les zones portent un
-    /// nom, et un client peut n'appartenir à aucune. On retombe alors sur la fin
-    /// de l'adresse MAC, qui reste identifiable, plutôt que sur un « Enceinte 2 »
-    /// qui changerait d'ordre entre deux lectures.
+    /// Les noms ne sont pas dans `/api/volume/state` — seules les zones y sont
+    /// nommées, si bien que deux enceintes d'une même zone s'appelaient toutes
+    /// deux « Salon ». Ils vivent dans `/api/multiroom/state`, qui donne aussi
+    /// `online` et `volume_control` : une enceinte éteinte n'a rien à faire dans
+    /// la liste, et une enceinte sans contrôle de volume ne doit pas afficher un
+    /// curseur qui ne fera rien.
     private static func buildDevices() async -> [MiloSessionAttributes.Device] {
-        guard let data = try? await MiloAPIClient.get(path: "/api/volume/state"),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let payload = json["data"] as? [String: Any],
+        async let volumeTask = MiloAPIClient.get(path: "/api/volume/state")
+        async let roomsTask = MiloAPIClient.get(path: "/api/multiroom/state")
+
+        guard let volumeData = try? await volumeTask,
+              let volumeJSON = try? JSONSerialization.jsonObject(with: volumeData) as? [String: Any],
+              let payload = volumeJSON["data"] as? [String: Any],
               let clients = payload["clients"] as? [String: [String: Any]]
         else { return [] }
 
-        var zoneOf: [String: String] = [:]
-        if let zones = payload["zones"] as? [String: [String: Any]] {
-            for zone in zones.values {
-                guard let name = zone["name"] as? String,
-                      let ids = zone["client_ids"] as? [String] else { continue }
-                for id in ids { zoneOf[id] = name }
-            }
-        }
+        let rooms = (try? await roomsTask)
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            .flatMap { $0?["clients"] as? [String: [String: Any]] } ?? [:]
 
         let limits = MiloAPIClient.volumeLimits()
         let span = limits.max - limits.min
 
-        return clients.keys.sorted().map { mac in
+        return clients.keys.sorted().compactMap { mac -> MiloSessionAttributes.Device? in
+            let room = rooms[mac]
+            guard room?["online"] as? Bool ?? true else { return nil }
+            guard room?["volume_control"] as? Bool ?? true else { return nil }
+
             let db = clients[mac]?["volume_db"] as? Double ?? limits.min
             let normalized = span > 0 ? (db - limits.min) / span : 0
             return MiloSessionAttributes.Device(
                 id: mac,
-                name: zoneOf[mac] ?? "Milō \(mac.suffix(5))",
+                name: room?["name"] as? String ?? "Milō \(mac.suffix(5))",
                 type: "speaker",
                 volume: Float(min(max(normalized, 0), 1))
             )

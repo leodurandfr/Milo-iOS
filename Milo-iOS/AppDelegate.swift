@@ -40,7 +40,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             // d'APNs. Elle passe quand même par l'extension, que le système
             // appelle pour la construire — c'est donc aussi le seul essai qui
             // dise si cette extension est utilisable.
-            Task { await MiloNowPlayingBridge.refresh() }
+            MiloNowPlayingBridge.startPump()
         }
 
         return true
