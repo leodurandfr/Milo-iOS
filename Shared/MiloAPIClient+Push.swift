@@ -10,6 +10,8 @@ extension MiloAPIClient {
 
     static let deviceIDKey = "milo_push_device_id"
     static let registeredWidgetTokenKey = "milo_registered_widget_token"
+    static let refusedWidgetTokenKey = "milo_refused_widget_token"
+    static let refusalDetailKey = "milo_push_refusal_detail"
 
     /// Nature du token, telle que Milō la range dans son registre.
     ///
@@ -99,20 +101,40 @@ extension MiloAPIClient {
         return fresh
     }
 
+    /// Verdict d'un enregistrement, et surtout : faut-il réessayer.
+    ///
+    /// La distinction est la seule chose qui sépare un rattrapage d'une boucle.
+    /// Un 4xx est un jugement sur la requête elle-même — la rejouer dépense des
+    /// lancements pour un résultat qui ne peut pas changer. Une panne réseau est
+    /// transitoire et mérite exactement le contraire.
+    enum PushRegistrationOutcome {
+        case registered
+        /// Milō a refusé la requête pour sa forme. `detail` porte ce qu'il
+        /// reproche — le 422 nomme le champ et les valeurs admises.
+        case refused(String)
+        /// Milō n'a pas répondu, ou a échoué de son côté. Réessayer a du sens.
+        case unavailable
+    }
+
     /// Dépose un token chez Milō. Idempotent : à appeler à chaque lancement.
     ///
     /// `sessionID` est requis pour `.session` et interdit ailleurs — Milō répond
     /// 422 sur un désaccord, plutôt que d'enregistrer quelque chose d'ambigu.
-    @discardableResult
+    ///
+    /// Le code HTTP est lu, et pas seulement `status`. Ne lire que `status`
+    /// rendait un 422 indiscernable d'une panne réseau : c'est ainsi qu'un
+    /// `environment` refusé est resté invisible, route correcte, méthode
+    /// correcte, champ correct, valeur rejetée — et le contrat au vert, puisqu'il
+    /// prouve l'existence des routes et non les valeurs qu'on met dans un corps.
     static func registerPushToken(_ token: Data,
                                   kind: PushTokenKind,
-                                  sessionID: String? = nil) async -> Bool {
+                                  sessionID: String? = nil) async -> PushRegistrationOutcome {
         let hex = token.map { String(format: "%02x", $0) }.joined()
 
         guard let environment = apsEnvironment() else {
-            // Sans environnement il n'y a rien d'utile à envoyer : un token
-            // enregistré sous le mauvais hôte échouerait en silence côté Milō.
-            return false
+            // Le profil est illisible (simulateur). Rien d'utile à envoyer, et
+            // rien qu'un réessai corrigerait sur ce build.
+            return .refused("aps-environment illisible")
         }
 
         var body: [String: Any] = [
@@ -123,12 +145,63 @@ extension MiloAPIClient {
         ]
         if let sessionID { body["session_id"] = sessionID }
 
-        guard let data = try? JSONSerialization.data(withJSONObject: body),
-              let response = try? await post(path: "/api/push/tokens", body: data),
-              let json = try? JSONSerialization.jsonObject(with: response) as? [String: Any]
-        else { return false }
+        guard let url = URL(string: baseURL() + "/api/push/tokens"),
+              let payload = try? JSONSerialization.data(withJSONObject: body)
+        else { return .refused("requête impossible à construire") }
 
-        return json["status"] as? String == "success"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 3
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = payload
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse
+        else { return .unavailable }
+
+        if http.statusCode == 200,
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           json["status"] as? String == "success" {
+            return .registered
+        }
+
+        guard (400..<500).contains(http.statusCode) else { return .unavailable }
+
+        // Le corps du 422 nomme le champ fautif et les valeurs admises. Le garder
+        // tel quel : reformuler ferait perdre la seule information exploitable.
+        let detail = String(data: data, encoding: .utf8) ?? ""
+        return .refused("HTTP \(http.statusCode) \(detail)")
+    }
+
+    /// Enregistre le token du widget, en retenant le verdict.
+    ///
+    /// Un token déjà accepté ne coûte rien. Un token déjà refusé n'est pas
+    /// rejoué : c'est ce qui empêche le rattrapage de la timeline de devenir une
+    /// boucle contre un serveur qui a déjà dit non. Un token neuf lève la
+    /// consigne — le refus portait sur l'ancien, pas sur l'app.
+    static func registerWidgetToken(_ token: Data) async {
+        let hex = token.map { String(format: "%02x", $0) }.joined()
+        let defaults = UserDefaults(suiteName: appGroupID)
+
+        guard defaults?.string(forKey: registeredWidgetTokenKey) != hex,
+              defaults?.string(forKey: refusedWidgetTokenKey) != hex
+        else { return }
+
+        switch await registerPushToken(token, kind: .widget) {
+        case .registered:
+            defaults?.set(hex, forKey: registeredWidgetTokenKey)
+            defaults?.removeObject(forKey: refusedWidgetTokenKey)
+            defaults?.removeObject(forKey: refusalDetailKey)
+        case .refused(let detail):
+            // Consigné plutôt que tu : sans cette trace, un désaccord de forme
+            // reste aussi muet que celui qu'on vient de passer des heures à
+            // trouver.
+            defaults?.set(hex, forKey: refusedWidgetTokenKey)
+            defaults?.set(detail, forKey: refusalDetailKey)
+        case .unavailable:
+            break // Milō est peut-être éteint : la timeline repassera.
+        }
     }
 
     /// Retire un token du registre — quand la dernière instance d'un widget
@@ -156,19 +229,12 @@ extension MiloAPIClient {
     /// resterait muet indéfiniment.
     ///
     /// La timeline, elle, repasse régulièrement. On s'en sert pour reposer la
-    /// question à Milō tant qu'il n'a pas confirmé. L'appel est ignoré dès que le
-    /// token courant est celui qu'on a déjà fait accepter, donc le cas normal ne
-    /// coûte aucune requête.
+    /// question à Milō tant qu'il n'a pas confirmé. `registerWidgetToken` décide
+    /// seul s'il y a lieu de redemander : un token déjà accepté, comme un token
+    /// déjà refusé pour sa forme, ne coûte aucune requête.
     @available(iOS 26.0, *)
     static func reconcileWidgetPushToken() async {
         guard let info = await WidgetCenter.shared.currentPushInfo else { return }
-        let hex = info.token.map { String(format: "%02x", $0) }.joined()
-
-        let defaults = UserDefaults(suiteName: appGroupID)
-        guard defaults?.string(forKey: registeredWidgetTokenKey) != hex else { return }
-
-        if await registerPushToken(info.token, kind: .widget) {
-            defaults?.set(hex, forKey: registeredWidgetTokenKey)
-        }
+        await registerWidgetToken(info.token)
     }
 }

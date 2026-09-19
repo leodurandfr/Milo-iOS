@@ -25,6 +25,6 @@ struct MiloWidgetPushHandler: WidgetPushHandler {
             return
         }
 
-        Task { await MiloAPIClient.registerPushToken(token, kind: .widget) }
+        Task { await MiloAPIClient.registerWidgetToken(token) }
     }
 }
