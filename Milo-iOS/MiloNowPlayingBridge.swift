@@ -184,8 +184,13 @@ enum MiloNowPlayingBridge {
         // de son côté pendant que la vivante, invisible, recevait tout.
         await reconcileSession()
 
+        // Personne n'a ouvert ? On ouvre, si quelque chose joue.
+        if session == nil {
+            await openSession(attributes)
+        }
+
         guard let session else {
-            note("aucune session ouverte par Milō")
+            note("aucune session, et rien à ouvrir")
             return
         }
 
@@ -238,8 +243,72 @@ enum MiloNowPlayingBridge {
     /// plus rapide qu'un aller-retour par Apple. Quand rien n'est ouvert, il n'y
     /// a rien à afficher et rien à faire : Milō pousse un `start` dès que la
     /// lecture reprend.
+    /// Le système tient-il **une** session, même lâchée par l'app ?
+    ///
+    /// Distinct de `session != nil` : une session écartée dans `disowned` reste
+    /// vivante côté système. Ouvrir alors en créerait une seconde — exactement
+    /// la panne du 19/09.
+    private static var systemHoldsAny = false
+
+    /// Dernière tentative d'ouverture. Sans ce frein, un refus relancerait une
+    /// ouverture toutes les deux secondes.
+    private static var lastStartAttempt = Date.distantPast
+    private static let startRetryDelay: TimeInterval = 10
+
+    /// Ouvre une session quand personne ne l'a fait et que la lecture est en cours.
+    ///
+    /// **C'est le retour d'un chemin retiré le 19/09/2026, et ce n'est pas un
+    /// oubli de l'avoir retiré.** Ce qui avait cassé n'était pas l'ouverture :
+    /// c'était d'ouvrir *pendant* que Milō en ouvrait une autre par push. Deux
+    /// sessions vivantes, la visible déjà morte côté Milō, l'autre recevant tout
+    /// sans être vue.
+    ///
+    /// Trois gardes, et la première est celle qui manquait alors :
+    ///
+    /// - **le système ne tient rien** — `sessions()` vide, pas seulement « l'app
+    ///   n'en tient pas » ; c'est la distinction qui a coûté la panne ;
+    /// - **quelque chose joue**, sinon il n'y a rien à afficher et la carte
+    ///   resterait vide sur l'écran verrouillé ;
+    /// - **un essai toutes les dix secondes** au plus.
+    ///
+    /// Et l'app peut ce que le push ne peut pas : `requestToBecomeSystemPrimary()`
+    /// exige le premier plan. Une session née d'un push naît pendant que l'app
+    /// dort, donc elle ne peut jamais réclamer l'écran elle-même. Celle-ci, si.
+    ///
+    /// Ça ne remplace pas le `start` de Milō, qui reste le seul chemin quand
+    /// l'app n'a jamais été lancée. Ça couvre le cas où la musique jouait déjà
+    /// avant qu'on ouvre l'app — où rien n'ouvrait de session, puisque Milō
+    /// n'envoie un `start` que sur un événement de lecture.
+    private static func openSession(_ attributes: MiloSessionAttributes) async {
+        guard !systemHoldsAny, attributes.isPlaying,
+              Date().timeIntervalSince(lastStartAttempt) > startRetryDelay
+        else { return }
+        lastStartAttempt = Date()
+
+        do {
+            // L'identifiant est minté ici : c'est une session à nous, et Milō
+            // apprendra son token par l'extension, qui l'enregistre à la
+            // construction comme pour n'importe quelle autre.
+            let opened = try await RemoteMediaSession.start(
+                attributes: attributes.with(id: UUID().uuidString))
+            session = opened
+            systemHoldsAny = true
+            // La signature décrit ce qu'on a poussé ailleurs ; sur une session
+            // neuve elle ne vaut rien.
+            lastSignature = ""
+
+            // Réclamer l'écran maintenant, tant qu'on est au premier plan.
+            try? await opened.requestToBecomeSystemPrimary()
+            await MiloAPIClient.reportLiveSessions([opened.id])
+            note("session ouverte par l'app (\(opened.id))")
+        } catch {
+            note("ouverture refusée : \(error)")
+        }
+    }
+
     private static func reconcileSession() async {
         let all = (try? await RemoteMediaSession<MiloSessionAttributes>.sessions()) ?? []
+        systemHoldsAny = !all.isEmpty
 
         // Dit à Milō ce que le téléphone tient réellement, **avant** de filtrer.
         //
