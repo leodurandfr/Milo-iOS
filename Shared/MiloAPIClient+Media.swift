@@ -1,0 +1,75 @@
+import Foundation
+
+/// Ce que l'écran verrouillé renvoie vers Milō.
+///
+/// Tout part en HTTP sur le LAN. APNs ne porte que l'état descendant : rien de
+/// ce qui suit n'emprunte Internet, et rien n'a besoin que Milō soit joignable
+/// de l'extérieur.
+extension MiloAPIClient {
+
+    enum TransportCommand: String {
+        case play = "resume"
+        case pause
+        case playPause = "playpause"
+        case next
+        case previous = "prev"
+    }
+
+    /// Source active du moment, telle que `/api/audio/state` la nomme.
+    ///
+    /// `/api/audio/control/{source}` s'adresse à une source précise : il n'existe
+    /// pas de « commande au système ». On relit donc la source courante juste
+    /// avant, plutôt que de mémoriser celle du dernier push — elle peut avoir
+    /// changé sous nos pieds, et la session survit justement à ce changement.
+    private static func activeSource() async -> String? {
+        guard let data = try? await get(path: "/api/audio/state"),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return json["active_source"] as? String
+    }
+
+    /// Envoie une commande de transport. Sans effet si aucune source n'est active.
+    static func fireTransport(_ command: TransportCommand) async {
+        guard let source = await activeSource() else { return }
+        let body = try? JSONSerialization.data(withJSONObject: ["command": command.rawValue])
+        _ = try? await post(path: "/api/audio/control/\(source)", body: body)
+    }
+
+    /// Déplace la tête de lecture. Milō attend des millisecondes ; le système,
+    /// lui, raisonne en secondes.
+    static func fireSeek(toSeconds position: TimeInterval) async {
+        guard let source = await activeSource() else { return }
+        let body = try? JSONSerialization.data(withJSONObject: [
+            "command": "seek",
+            "data": ["position_ms": Int(position * 1000)]
+        ])
+        _ = try? await post(path: "/api/audio/control/\(source)", body: body)
+    }
+
+    /// Applique un niveau de curseur à une enceinte.
+    ///
+    /// Le curseur donne 0…1, Milō stocke des dB : on refait le chemin que Milō a
+    /// fait dans l'autre sens, avec les mêmes bornes. Écriture **absolue** — un
+    /// delta serait une lecture-modification-écriture en course contre l'encodeur
+    /// rotatif de l'appareil et son propre écran, ce que ces routes existent
+    /// précisément pour éviter.
+    static func setClientVolume(mac: String, normalized level: Float) async {
+        let limits = volumeLimits()
+        let clamped = min(max(Double(level), 0), 1)
+        let db = limits.min + clamped * (limits.max - limits.min)
+
+        // Le MAC voyage dans le chemin : `:` doit être échappé.
+        let encoded = mac.addingPercentEncoding(
+            withAllowedCharacters: .alphanumerics) ?? mac
+        guard let url = URL(string: baseURL() + "/api/volume/client/mac/\(encoded)")
+        else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.timeoutInterval = 3
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["volume_db": db])
+        _ = try? await URLSession.shared.data(for: request)
+    }
+}

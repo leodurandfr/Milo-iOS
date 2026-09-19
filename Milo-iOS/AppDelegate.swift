@@ -32,6 +32,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             Task { await MiloAPIClient.reconcileWidgetPushToken() }
         }
 
+        // Sans ce token, Milō ne peut ouvrir aucune session Now Playing quand
+        // l'app ne tourne pas — c'est-à-dire presque toujours.
+        if #available(iOS 27.0, *) {
+            MiloPushToStart.begin()
+        }
+
         return true
     }
 
