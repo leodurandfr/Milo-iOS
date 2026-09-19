@@ -155,9 +155,21 @@ enum MiloNowPlayingBridge {
         // ouvre une rivale que le système n'affiche pas.
         await MiloAPIClient.drainPendingSessionToken()
 
-        guard let attributes = await buildAttributes() else {
+        let attributes: MiloSessionAttributes
+        switch await buildState() {
+        case .injoignable:
+            // Ne rien changer : une coupure réseau n'est pas une fin de lecture,
+            // et effacer la carte à chaque paquet perdu la ferait clignoter.
             note("pas d'état exploitable depuis Milō")
             return
+        case .rienÀMontrer:
+            // Réconcilier d'abord : on ferme ce que le système tient vraiment,
+            // pas ce que l'app croit tenir.
+            await reconcileSession()
+            await endSession(reason: "aucune source active")
+            return
+        case .lecture(let built):
+            attributes = built
         }
 
         // Ne pousser que ce qui change l'affichage.
@@ -243,6 +255,27 @@ enum MiloNowPlayingBridge {
     /// plus rapide qu'un aller-retour par Apple. Quand rien n'est ouvert, il n'y
     /// a rien à afficher et rien à faire : Milō pousse un `start` dès que la
     /// lecture reprend.
+    /// Ferme la session et efface la carte.
+    ///
+    /// L'app ne possède pas le cycle de vie — Milō ouvre, l'app suit. Mais elle
+    /// est la seule à savoir que plus rien ne joue **et** que la carte est
+    /// encore là : Milō, lui, a déjà tourné la page. `reportLiveSessions`, appelé
+    /// à chaque passe, lui apprend aussitôt que le téléphone ne tient plus rien,
+    /// donc le token est retiré au lieu d'être adressé dans le vide.
+    private static func endSession(reason: String) async {
+        guard let live = session else { return }
+        session = nil
+        systemHoldsAny = false
+        lastSignature = ""
+        lastElapsed = nil
+        do {
+            try await live.end()
+            note("session close (\(reason))")
+        } catch {
+            note("fermeture refusée : \(error)")
+        }
+    }
+
     /// Le système tient-il **une** session, même lâchée par l'app ?
     ///
     /// Distinct de `session != nil` : une session écartée dans `disowned` reste
@@ -359,13 +392,48 @@ enum MiloNowPlayingBridge {
 
     // MARK: - Construction
 
-    private static func buildAttributes() async -> MiloSessionAttributes? {
+    /// Ce que Milō dit de lui-même, en trois cas qu'il ne faut surtout pas
+    /// confondre.
+    ///
+    /// `injoignable` et `rienÀMontrer` se lisaient jusqu'ici tous les deux comme
+    /// « pas d'attributs » et menaient au même `return` : on ne touchait à rien.
+    /// D'où le symptôme — on change de source, plus rien n'est prêt, et la carte
+    /// reste figée sur la piste d'avant, en pause. Ce sont deux situations
+    /// opposées : une coupure réseau ne doit **rien** changer à l'affichage, une
+    /// absence de source doit l'effacer.
+    private enum MiloState {
+        case injoignable
+        case rienÀMontrer
+        case lecture(MiloSessionAttributes)
+    }
+
+    private static func buildState() async -> MiloState {
         guard let audioData = try? await MiloAPIClient.get(path: "/api/audio/state"),
               let audio = try? JSONSerialization.jsonObject(with: audioData) as? [String: Any]
-        else { return nil }
+        else { return .injoignable }
 
         let metadata = audio["metadata"] as? [String: Any]
         let isPlaying = metadata?["is_playing"] as? Bool ?? false
+
+        // Rien à montrer, et on le dit.
+        //
+        // `source_state` est une chaîne libre dans le contrat — seul « active »
+        // est attesté. On teste donc l'égalité à « active » plutôt que
+        // d'énumérer les autres valeurs, qui peuvent changer sans nous prévenir.
+        //
+        // `transitioning` exclut le battement d'un changement de source : la
+        // fermer là ferait disparaître puis réapparaître la carte à chaque
+        // bascule. Et `metadata` vide compte comme rien seulement si la lecture
+        // ne tourne pas — un trou de métadonnées sous une source qui joue ne
+        // doit pas fermer la session.
+        let source = audio["active_source"] as? String ?? ""
+        let sourceState = audio["source_state"] as? String ?? ""
+        let transitioning = audio["transitioning"] as? Bool ?? false
+        if !transitioning,
+           source.isEmpty || source == "none" || sourceState != "active"
+            || ((metadata?.isEmpty ?? true) && !isPlaying) {
+            return .rienÀMontrer
+        }
 
         // Millisecondes côté Milō, secondes côté framework.
         let positionMS = metadata?["position"] as? Double ?? 0
@@ -412,7 +480,7 @@ enum MiloNowPlayingBridge {
             }
         }
 
-        return MiloSessionAttributes(
+        return .lecture(MiloSessionAttributes(
             // Place tenue, jamais envoyée telle quelle : `refresh()` la remplace
             // par l'identifiant de la session qu'il tient, seul que
             // `update(_:)` accepte. L'app n'en mint plus aucun — voir
@@ -423,7 +491,7 @@ enum MiloNowPlayingBridge {
             timestamp: ISO8601DateFormatter().string(from: .now),
             currentTrack: track,
             devices: await buildDevices()
-        )
+        ))
     }
 
     /// Un device par client snapcast, avec son vrai nom.
