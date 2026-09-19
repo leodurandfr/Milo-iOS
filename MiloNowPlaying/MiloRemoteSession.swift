@@ -67,6 +67,12 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         miloLog.info("SESSION CONSTRUITE \(attributes.id, privacy: .public) — instance \(ObjectIdentifier(self).debugDescription, privacy: .public)")
         Self.trace("session construite \(attributes.id)")
 
+        // Le client partagé n'a pas de journal à lui : il écrit dans le nôtre
+        // quand on lui en prête un. Sans ça, la décision « geste global ou
+        // curseur individuel » ne laisse aucune trace, et c'est précisément
+        // celle qu'il faudra relire.
+        MiloAPIClient.trace = { Self.trace($0) }
+
         startObservingPushToken()
     }
 
@@ -476,6 +482,11 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             .map { "\($0.device.id)=\(((($0.level * 10000).rounded()) / 10000))" }
             .joined(separator: " "))
 
+        // Le nombre d'enceintes que le système a sous les yeux, figé ici : c'est
+        // lui qui dit si une rafale les a toutes touchées, donc si le geste
+        // portait sur le curseur global.
+        let count = shown.count
+
         return shown.map { device, level in
             MediaDevice(
                 id: device.id,
@@ -488,8 +499,10 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                         // requête qui échoue, et ce sont deux causes opposées.
                         miloLog.info("RAPPEL VOLUME \(device.id, privacy: .public) -> \(newLevel, privacy: .public)")
                         Self.trace("onChange \(device.id) -> \(newLevel)")
-                        await MiloAPIClient.setClientVolume(mac: device.id,
-                                                            normalized: newLevel)
+                        await MiloAPIClient.applyVolume(mac: device.id,
+                                                        from: level,
+                                                        to: newLevel,
+                                                        deviceCount: count)
                     }
                 ]
             )

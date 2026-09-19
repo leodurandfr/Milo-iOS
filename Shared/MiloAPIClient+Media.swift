@@ -249,21 +249,71 @@ extension MiloAPIClient {
     /// avant que l'écriture soit partie laissait le système terminer l'extension
     /// entre-temps, et c'est justement la dernière valeur du geste qui
     /// disparaissait.
-    static func setClientVolume(mac: String, normalized level: Float) async {
+    /// Journal de l'appelant, quand il en a un. L'extension y branche le sien.
+    nonisolated(unsafe) static var trace: (@Sendable (String) -> Void)?
+
+    /// Applique à une enceinte ce que le système vient de demander.
+    ///
+    /// `base` est le niveau que **nous** lui avions rendu, `target` celui qu'il
+    /// réclame. Les deux, parce que leur rapport est la seule chose que le
+    /// curseur global nous transmette : mesuré le 20/09/2026, un glissement
+    /// envoie ×1,90000 sur les trois enceintes à la fois, dans un sens puis dans
+    /// l'autre, et revient aux valeurs identiques au huitième chiffre. Le
+    /// système ne pose pas un niveau, il multiplie les nôtres.
+    static func applyVolume(mac: String, from base: Float, to target: Float,
+                            deviceCount: Int) async {
         let limits = volumeLimits()
-        let clamped = min(max(Double(level), 0), 1)
-        let db = limits.min + clamped * (limits.max - limits.min)
-
-        // Valeur optimiste posée tout de suite, elle : la session est rafraîchie
-        // en boucle depuis Milō, et une lecture partie avant que l'écriture
-        // atterrisse repousserait l'ancien niveau — le curseur reculerait sous
-        // le doigt. Même remède que `lastInteractionKey` côté widget.
+        let span = limits.max - limits.min
+        let clampedBase = min(max(Double(base), 0), 1)
+        let clampedTarget = min(max(Double(target), 0), 1)
         let plain = mac.replacingOccurrences(of: ":", with: "")
-        let defaults = UserDefaults(suiteName: appGroupID)
-        defaults?.set(db, forKey: optimisticVolumeKey(plain))
-        defaults?.set(Date().timeIntervalSince1970, forKey: optimisticVolumeAtKey(plain))
 
-        await VolumeWriter.shared.write(mac: plain, db: db)
+        await VolumeGesture.shared.record(
+            mac: plain,
+            baseDB: limits.min + clampedBase * span,
+            targetDB: limits.min + clampedTarget * span,
+            // Le rapport se lit sur l'échelle normalisée, la seule que le système
+            // manipule. Sous un plancher, il n'a plus de sens : diviser par une
+            // base quasi nulle rend un facteur immense pour un geste minuscule.
+            ratio: clampedBase >= 0.02 ? clampedTarget / clampedBase : nil,
+            deviceCount: deviceCount)
+    }
+
+    /// Le volume global que vise un geste, ou `nil` si ce n'en est pas un.
+    ///
+    /// **La conversion est le cœur du sujet.** Nos 0…1 sont une position sur une
+    /// règle graduée en dB, pas une intensité sonore ; le système, lui, croit
+    /// multiplier un gain. Appliquer son ×1,9 à la position donnait +18,9 dB,
+    /// et — pire — un écart qui dépend de l'endroit d'où l'on part : le même
+    /// geste vaut +37,8 dB une octave plus haut. Lu comme un gain,
+    /// `20·log₁₀(1,9)`, il vaut +5,6 dB partout. Un geste donné produit toujours
+    /// le même écart, ce qui est la seule propriété qu'un curseur doive avoir.
+    ///
+    /// Le global de Milō est la moyenne des clients — vérifié contre
+    /// `/api/volume/state` — et `set_volume_db` décale ensuite tout le monde du
+    /// même delta, sous `_volume_lock`. C'est ce qui préserve l'équilibre entre
+    /// les pièces, que trois écritures absolues indépendantes écartaient un peu
+    /// plus à chaque geste : 0,58 dB d'écart avant, 1,10 dB après un seul.
+    static func globalTarget(baseDBs: [Double], ratio: Double,
+                             limits: (min: Double, max: Double)) -> Double? {
+        guard !baseDBs.isEmpty, ratio > 0 else { return nil }
+        let mean = baseDBs.reduce(0, +) / Double(baseDBs.count)
+        let delta = 20 * log10(ratio)
+        return min(max(mean + delta, limits.min), limits.max)
+    }
+
+    /// Les rapports décrivent-ils un seul geste sur le curseur global ?
+    ///
+    /// Trois conditions, chacune pour une raison propre : **toutes** les
+    /// enceintes touchées, sinon c'est un curseur individuel ; au moins deux,
+    /// sinon il n'y a pas d'équilibre à préserver et l'écriture par client est
+    /// exacte ; et des rapports qui concordent à 1 %, là où le système en envoie
+    /// à sept chiffres identiques.
+    static func isGlobalGesture(ratios: [Double], touched: Int, deviceCount: Int) -> Bool {
+        guard deviceCount >= 2, touched == deviceCount, ratios.count == touched,
+              let low = ratios.min(), let high = ratios.max(), low > 0
+        else { return false }
+        return (high - low) <= 0.01 * high
     }
 
     /// L'écriture elle-même, une fois le geste retombé.
@@ -297,6 +347,43 @@ extension MiloAPIClient {
         }
     }
 
+    /// Le volume global, en une requête.
+    ///
+    /// Milō décale tous les clients du même delta sous `_volume_lock`, ce qui est
+    /// le seul endroit où ça peut être atomique. Trois écritures absolues
+    /// concurrentes aboutissaient aussi — vérifié — mais chacune posait un
+    /// niveau calculé de son côté, et l'équilibre entre les pièces s'écartait à
+    /// chaque geste.
+    ///
+    /// Hors bornes, cette route **borne** au lieu de refuser, contrairement à la
+    /// route par client qui répond 400. La réponse porte donc le niveau
+    /// réellement appliqué.
+    fileprivate static func writeGlobalVolume(db: Double) async {
+        guard let url = URL(string: baseURL() + "/api/volume/global") else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.timeoutInterval = 3
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(
+            withJSONObject: ["volume_db": db, "show_bar": true])
+
+        let defaults = UserDefaults(suiteName: appGroupID)
+        do {
+            let (_, response) = try await lan.data(for: request)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            if code == 200 {
+                defaults?.removeObject(forKey: "milo_volume_write_error")
+            } else {
+                defaults?.set("global -> HTTP \(code)", forKey: "milo_volume_write_error")
+            }
+        } catch {
+            defaults?.set("global -> réseau : \(error.localizedDescription)",
+                          forKey: "milo_volume_write_error")
+        }
+    }
+
     // MARK: - Valeur optimiste
 
     /// Durée pendant laquelle l'affichage préfère ce qu'on vient de demander à ce
@@ -304,6 +391,18 @@ extension MiloAPIClient {
     /// rafraîchissement, assez courte pour qu'un refus du serveur redevienne
     /// visible plutôt que d'être masqué indéfiniment.
     static let optimisticVolumeWindow: TimeInterval = 3
+
+    /// Pose la valeur optimiste d'une enceinte (MAC déjà sans deux-points).
+    ///
+    /// Elle est posée **avant** l'écriture réseau : la session est rafraîchie en
+    /// boucle depuis Milō, et une lecture partie avant que l'écriture atterrisse
+    /// repousserait l'ancien niveau — le curseur reculerait sous le doigt, et le
+    /// système recalculerait son facteur sur une base périmée.
+    static func noteOptimistic(mac plain: String, db: Double) {
+        let defaults = UserDefaults(suiteName: appGroupID)
+        defaults?.set(db, forKey: optimisticVolumeKey(plain))
+        defaults?.set(Date().timeIntervalSince1970, forKey: optimisticVolumeAtKey(plain))
+    }
 
     static func optimisticVolumeKey(_ mac: String) -> String { "milo_opt_vol_\(mac)" }
     static func optimisticVolumeAtKey(_ mac: String) -> String { "milo_opt_at_\(mac)" }
@@ -321,16 +420,24 @@ extension MiloAPIClient {
     }
 }
 
-/// Ne garde que la dernière valeur demandée par enceinte.
+/// Ne garde que la dernière intention du geste, et décide de sa nature.
 ///
-/// Une tâche par enceinte, annulée et remplacée à chaque nouvel événement : au
-/// repos du geste, une seule écriture part par enceinte, avec la valeur que le
-/// doigt a laissée. Les enceintes ne se gênent pas entre elles — une rafale qui
-/// en oublie une ne doit pas empêcher les autres d'aboutir.
-private actor VolumeWriter {
-    static let shared = VolumeWriter()
+/// Une seule échéance pour toutes les enceintes, et non plus une par enceinte :
+/// c'est ce qui permet de voir une rafale **comme un tout**. Trois rappels
+/// portant le même rapport sont un geste sur le curseur global ; un seul rappel
+/// est un curseur individuel. Rendus séparément, ils étaient indiscernables.
+private actor VolumeGesture {
+    static let shared = VolumeGesture()
 
-    private var tasks: [String: Task<Void, Never>] = [:]
+    private struct Entry {
+        let baseDB: Double
+        let targetDB: Double
+        let ratio: Double?
+    }
+
+    private var pending: [String: Entry] = [:]
+    private var deviceCount = 0
+    private var flush: Task<Void, Never>?
 
     /// Assez long pour absorber une rafale, assez court pour que le son suive le
     /// doigt d'assez près.
@@ -356,15 +463,60 @@ private actor VolumeWriter {
     /// Les entrées de `tasks` ne sont pas retirées : le dictionnaire est indexé
     /// par enceinte, donc borné par leur nombre. Le nettoyer demanderait de
     /// distinguer sa propre tâche de celle qui l'a remplacée, pour rien.
-    func write(mac: String, db: Double) async {
-        tasks[mac]?.cancel()
-        let task = Task {
+    func record(mac: String, baseDB: Double, targetDB: Double,
+                ratio: Double?, deviceCount: Int) async {
+        pending[mac] = Entry(baseDB: baseDB, targetDB: targetDB, ratio: ratio)
+        self.deviceCount = deviceCount
+
+        flush?.cancel()
+        let task = Task { [weak self] in
             try? await Task.sleep(for: Self.quietPeriod)
             guard !Task.isCancelled else { return }
-            await MiloAPIClient.writeClientVolume(mac: mac, db: db)
+            await self?.send()
         }
-        tasks[mac] = task
+        flush = task
         await task.value
+    }
+
+    /// Une rafale coalescée part d'ici, et d'ici seulement.
+    private func send() async {
+        let entries = pending
+        pending = [:]
+        guard !entries.isEmpty else { return }
+
+        let limits = MiloAPIClient.volumeLimits()
+        let ratios = entries.values.compactMap(\.ratio)
+
+        if MiloAPIClient.isGlobalGesture(ratios: ratios,
+                                         touched: entries.count,
+                                         deviceCount: deviceCount),
+           let mean = ratios.isEmpty ? nil : ratios.reduce(0, +) / Double(ratios.count),
+           let target = MiloAPIClient.globalTarget(baseDBs: entries.values.map(\.baseDB),
+                                                   ratio: mean,
+                                                   limits: limits) {
+            // Les valeurs optimistes doivent décrire ce qu'on **applique**, pas
+            // ce que le système a demandé : les deux diffèrent désormais, et
+            // c'est la base du geste suivant qui en dépend.
+            let delta = target - entries.values.map(\.baseDB).reduce(0, +) / Double(entries.count)
+            for (mac, entry) in entries {
+                MiloAPIClient.noteOptimistic(mac: mac, db: entry.baseDB + delta)
+            }
+            MiloAPIClient.trace?("geste global ×\((mean * 1000).rounded() / 1000) "
+                                 + "→ \((target * 10).rounded() / 10) dB "
+                                 + "(\(entries.count) enceintes)")
+            await MiloAPIClient.writeGlobalVolume(db: target)
+            return
+        }
+
+        for (mac, entry) in entries {
+            MiloAPIClient.noteOptimistic(mac: mac, db: entry.targetDB)
+        }
+        MiloAPIClient.trace?("par enceinte (\(entries.count)/\(deviceCount))")
+        await withTaskGroup(of: Void.self) { group in
+            for (mac, entry) in entries {
+                group.addTask { await MiloAPIClient.writeClientVolume(mac: mac, db: entry.targetDB) }
+            }
+        }
     }
 }
 
