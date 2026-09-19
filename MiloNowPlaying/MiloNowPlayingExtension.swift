@@ -11,6 +11,12 @@ import NowPlaying
 @main
 struct MiloNowPlayingExtension: RemoteMediaSessionExtension {
 
+    init() {
+        // Cette extension n'atteint pas Milō par son IP — voir
+        // `MiloAPIClient.prefersHostname`, où la mesure est consignée.
+        MiloAPIClient.prefersHostname = true
+    }
+
     var configuration: RemoteMediaSessionExtensionConfiguration<Self> {
         RemoteMediaSessionExtensionConfiguration(extension: self)
     }

@@ -49,7 +49,22 @@ struct MiloAPIClient {
         if let muted { defaults?.set(muted, forKey: mutedKey) }
     }
 
+    /// Force le nom d'hôte plutôt que l'IP mise en cache.
+    ///
+    /// Mesuré depuis l'extension Now Playing, dans le même processus et à la
+    /// même seconde : `https://www.apple.com` répond 200,
+    /// `http://192.168.1.55` échoue en -1009, et `http://milo.local` répond 200.
+    /// iOS traite la connexion directe vers une IP privée comme un accès au
+    /// réseau local à autoriser — ce qu'une extension ne peut pas demander,
+    /// faute d'écran — là où la résolution `.local` passe.
+    ///
+    /// L'IP reste préférable partout ailleurs : elle évite une résolution mDNS
+    /// à chaque requête, ce qui compte pour un widget dont le processus est tué
+    /// s'il traîne.
+    nonisolated(unsafe) static var prefersHostname = false
+
     static func baseURL() -> String {
+        if prefersHostname { return "http://milo.local" }
         if let sharedDefaults = UserDefaults(suiteName: appGroupID),
            let ip = sharedDefaults.string(forKey: ipAddressKey), !ip.isEmpty {
             return "http://\(ip)"

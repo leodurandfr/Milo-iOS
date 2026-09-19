@@ -93,14 +93,36 @@ enum MiloNowPlayingBridge {
 
         var track: MiloSessionAttributes.Track?
         if let metadata, !metadata.isEmpty {
+            // Le modèle de Milō définit un socle commun — title, artist, album,
+            // album_art_url — présenté comme le contrat entre sources. Toutes ne
+            // le remplissent pas : la radio laisse ces quatre champs vides et
+            // fait voyager le morceau en extras (`track_title`, `track_artist`,
+            // `station_name`, `favicon`). D'où cette lecture en cascade, qui ne
+            // nomme aucune source en particulier : elle prend le socle quand il
+            // est là, et se rabat sinon sur les noms observés à côté.
+            //
+            // À retirer le jour où toutes les sources remplissent le socle. Ce
+            // n'est pas une préférence de style : tant qu'elle est là, chaque
+            // client réimplémente la même cascade, ce que le socle existe
+            // justement pour éviter.
+            func first(_ keys: String...) -> String? {
+                for key in keys {
+                    if let value = metadata[key] as? String, !value.isEmpty { return value }
+                }
+                return nil
+            }
+
+            let title = first("title", "track_title", "station_name")
             track = MiloSessionAttributes.Track(
-                id: (audio["active_source"] as? String ?? "milo") + ":" +
-                    (metadata["title"] as? String ?? "-"),
-                title: metadata["title"] as? String,
-                artist: metadata["artist"] as? String,
-                album: metadata["album"] as? String,
+                // L'identifiant change avec ce qui est affiché : sans ça, le
+                // système garde la pochette et le titre précédents, faute de
+                // savoir que le contenu a changé.
+                id: (audio["active_source"] as? String ?? "milo") + ":" + (title ?? "-"),
+                title: title,
+                artist: first("artist", "track_artist"),
+                album: first("album", "station_name"),
                 duration: durationMS / 1000,
-                artworkURL: metadata["album_art_url"] as? String
+                artworkURL: first("album_art_url", "track_artwork", "favicon")
             )
         }
 
@@ -148,7 +170,11 @@ enum MiloNowPlayingBridge {
             guard room?["online"] as? Bool ?? true else { return nil }
             guard room?["volume_control"] as? Bool ?? true else { return nil }
 
-            let db = clients[mac]?["volume_db"] as? Double ?? limits.min
+            // Ce qu'on vient de demander l'emporte sur ce que Milō rapporte
+            // pendant quelques secondes : sinon cette boucle repousse un niveau
+            // lu avant l'écriture, et le curseur recule sous le doigt.
+            let db = MiloAPIClient.optimisticVolume(mac: mac)
+                ?? clients[mac]?["volume_db"] as? Double ?? limits.min
             let normalized = span > 0 ? (db - limits.min) / span : 0
             return MiloSessionAttributes.Device(
                 id: mac,
