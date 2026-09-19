@@ -180,14 +180,6 @@ struct MiloAPIClient {
 
     // MARK: - Audio
 
-    static func getAudioState() async throws -> MiloAudioState {
-        let data = try await get(path: "/api/audio/state")
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw MiloAPIError.unavailable
-        }
-        return MiloAudioState(json: json)
-    }
-
     static func changeSource(_ name: String) async throws {
         _ = try await post(path: "/api/audio/source/\(name)")
     }
