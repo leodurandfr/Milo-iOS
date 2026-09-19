@@ -1,4 +1,6 @@
+import CoreGraphics
 import Foundation
+import ImageIO
 
 /// Ce que l'écran verrouillé renvoie vers Milō.
 ///
@@ -88,16 +90,26 @@ extension MiloAPIClient {
               !stations.isEmpty
         else { return }
 
-        let ids = stations.compactMap { $0["id"] as? String }
-        guard let index = ids.firstIndex(of: currentID) else { return }
+        // Filtrer les stations elles-mêmes, plutôt que d'en extraire une liste
+        // d'identifiants à côté.
+        //
+        // Un `compactMap` sur les seuls `id` donne une liste plus courte que
+        // `stations` dès qu'un favori n'en porte pas, et les deux sont ensuite
+        // indexées du même entier : on enverrait alors l'identifiant d'une
+        // station avec le corps d'une autre — et Milō jouerait la mauvaise.
+        // Garder un seul tableau rend le décalage impossible à écrire.
+        let usable = stations.filter { $0["id"] is String }
+        guard let index = usable.firstIndex(where: { $0["id"] as? String == currentID })
+        else { return }
 
         // Modulo plutôt que borne : arrivé au bout de la liste, on revient au
         // début. Un bouton qui ne fait rien une fois sur vingt-deux serait pris
         // pour une panne.
-        let next = (index + (forward ? 1 : -1) + ids.count) % ids.count
+        let station = usable[(index + (forward ? 1 : -1) + usable.count) % usable.count]
+        guard let nextID = station["id"] as? String else { return }
         let body = try? JSONSerialization.data(withJSONObject: [
             "command": "play_station",
-            "data": ["station_id": ids[next], "station": stations[next]]
+            "data": ["station_id": nextID, "station": station]
         ])
         _ = try? await post(path: "/api/audio/control/radio", body: body, timeout: 6)
     }
@@ -128,6 +140,11 @@ extension MiloAPIClient {
     /// oubliait une enceinte, qui restait alors au niveau d'avant et cassait
     /// l'équilibre entre les pièces. Ne garder que la dernière valeur par
     /// enceinte suffit, et c'est la seule qui décrive l'intention du geste.
+    ///
+    /// Différé, mais **attendu** : voir `VolumeWriter.write`. Rendre la main
+    /// avant que l'écriture soit partie laissait le système terminer l'extension
+    /// entre-temps, et c'est justement la dernière valeur du geste qui
+    /// disparaissait.
     static func setClientVolume(mac: String, normalized level: Float) async {
         let limits = volumeLimits()
         let clamped = min(max(Double(level), 0), 1)
@@ -142,7 +159,7 @@ extension MiloAPIClient {
         defaults?.set(db, forKey: optimisticVolumeKey(plain))
         defaults?.set(Date().timeIntervalSince1970, forKey: optimisticVolumeAtKey(plain))
 
-        await VolumeWriter.shared.schedule(mac: plain, db: db)
+        await VolumeWriter.shared.write(mac: plain, db: db)
     }
 
     /// L'écriture elle-même, une fois le geste retombé.
@@ -215,13 +232,35 @@ private actor VolumeWriter {
     /// doigt d'assez près.
     private static let quietPeriod = Duration.milliseconds(180)
 
-    func schedule(mac: String, db: Double) {
+    /// Programme l'écriture, **et l'attend**.
+    ///
+    /// L'attente n'est pas une question de style : c'est elle qui garde
+    /// l'extension en vie. `mediaremoted` la termine quelques millisecondes
+    /// après l'avoir lue — mesuré le 19/09/2026, six millisecondes entre la
+    /// lecture et le `RBSTerminateRequest`. Une écriture posée dans une tâche
+    /// détachée que personne n'attend meurt donc avec le processus, et c'est la
+    /// **dernière** valeur du geste qui se perdait ainsi : celle qui compte,
+    /// laissant une enceinte au niveau d'avant.
+    ///
+    /// Tant que l'appelant attend, le système tient son rappel pour en cours et
+    /// laisse le processus vivre.
+    ///
+    /// La coalescence est préservée : un événement plus récent annule le
+    /// précédent, dont l'attente se dénoue aussitôt — `Task.sleep` jette à
+    /// l'annulation, et la garde qui suit rend la main sans écrire.
+    ///
+    /// Les entrées de `tasks` ne sont pas retirées : le dictionnaire est indexé
+    /// par enceinte, donc borné par leur nombre. Le nettoyer demanderait de
+    /// distinguer sa propre tâche de celle qui l'a remplacée, pour rien.
+    func write(mac: String, db: Double) async {
         tasks[mac]?.cancel()
-        tasks[mac] = Task {
+        let task = Task {
             try? await Task.sleep(for: Self.quietPeriod)
             guard !Task.isCancelled else { return }
             await MiloAPIClient.writeClientVolume(mac: mac, db: db)
         }
+        tasks[mac] = task
+        await task.value
     }
 }
 
@@ -273,13 +312,18 @@ extension MiloAPIClient {
             UserDefaults(suiteName: appGroupID)?.set(step, forKey: "milo_cache_trace")
         }
 
+        purgeLegacyArtworkCacheOnce()
+
         guard let file = artworkCacheFile(for: urlString) else {
             note("pas de conteneur partagé"); return false
         }
-        if FileManager.default.fileExists(atPath: file.path) {
-            let size = (try? FileManager.default
-                .attributesOfItem(atPath: file.path)[.size] as? Int) ?? nil
-            note("déjà en cache (\(size ?? -1) o) \(file.path)")
+        // Présence et taille suffisent : le contenu est garanti affichable au
+        // moment où on l'écrit, pas relu ici. Cette fonction repasse toutes les
+        // deux secondes ; y relire chaque pochette pour en inspecter trois
+        // octets se paierait sans rien apprendre.
+        if let size = (try? FileManager.default
+            .attributesOfItem(atPath: file.path)[.size]) as? Int, size > 0 {
+            note("déjà en cache (\(size) o) \(file.path)")
             return true
         }
 
@@ -294,12 +338,92 @@ extension MiloAPIClient {
             guard code == 200, !data.isEmpty else {
                 note("HTTP \(code), \(data.count) o"); return false
             }
-            try data.write(to: file, options: .atomic)
-            note("déposé \(data.count) o dans \(file.path)")
+            // Un format qu'ImageIO ne sait pas décoder — un SVG, par exemple —
+            // est déposé tel quel. Il ne s'affichera pas, mais rien ne le
+            // rendrait affichable, et **ne rien écrire rouvrirait la boucle** :
+            // le cache resterait vide, et cette fonction retéléchargerait la
+            // même image toutes les deux secondes, indéfiniment.
+            let payload = jpegNormalized(data) ?? data
+            try payload.write(to: file, options: .atomic)
+            note("déposé \(payload.count) o dans \(file.path)"
+                 + (payload.count == data.count && !isJPEG(payload) ? " (non converti)" : ""))
             return true
         } catch {
             note("échec \(url.lastPathComponent) : \(error.localizedDescription)")
             return false
         }
+    }
+
+    private static let artworkCacheGenerationKey = "milo_artwork_cache_generation"
+
+    /// Vide une fois pour toutes le cache laissé par les versions antérieures.
+    ///
+    /// Elles y déposaient les octets d'origine, donc du WebP pour les images de
+    /// station, que le consommateur de `ArtworkRepresentation(data:)` n'affiche
+    /// pas. Comme la vérification de présence ne regarde plus le contenu, ces
+    /// entrées seraient réutilisées pour toujours.
+    ///
+    /// Une purge unique plutôt qu'un suffixe de génération dans le nom de
+    /// fichier : le suffixe abandonnerait un orphelin par pochette dans le
+    /// conteneur partagé, sans que rien ne vienne jamais le ramasser. Ce qui est
+    /// effacé ici est retéléchargé à la demande.
+    private static func purgeLegacyArtworkCacheOnce() {
+        let defaults = UserDefaults(suiteName: appGroupID)
+        guard defaults?.integer(forKey: artworkCacheGenerationKey) != 1,
+              let dir = artworkCacheDirectory()
+        else { return }
+
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil)) ?? []
+        for file in files {
+            try? FileManager.default.removeItem(at: file)
+        }
+        defaults?.set(1, forKey: artworkCacheGenerationKey)
+    }
+
+    /// Les trois octets d'en-tête d'un JFIF/Exif.
+    private static func isJPEG(_ data: Data) -> Bool {
+        data.count > 3 && data[data.startIndex] == 0xFF
+            && data[data.startIndex + 1] == 0xD8
+            && data[data.startIndex + 2] == 0xFF
+    }
+
+    /// Ramène n'importe quelle image au JPEG, en gardant ses dimensions.
+    ///
+    /// Le consommateur de `ArtworkRepresentation(data:)` n'accepte pas le WebP :
+    /// mesuré le 19/09/2026, les quatre images de station servies par Milō sont
+    /// des WebP VP8 1024×1024, elles arrivent intactes jusqu'au système et
+    /// n'affichent rien, quand tout ce qui s'affiche — pochettes Shazam,
+    /// in-band, Spotify, bibliothèque musicale — est du JPEG sans exception.
+    ///
+    /// La conversion vit dans l'app, et c'est tout l'intérêt : l'extension, elle,
+    /// est tuée quelques millisecondes après avoir été lue, et ne peut pas se
+    /// permettre de décoder quoi que ce soit. L'app tourne, elle a le temps.
+    ///
+    /// Les dimensions sont conservées telles quelles, délibérément : le format
+    /// et la taille étaient confondus dans les observations (le WebP en 1024, le
+    /// JPEG en 600), et redimensionner en même temps qu'on convertit aurait
+    /// laissé les deux hypothèses indistinctes une fois de plus.
+    ///
+    /// Un JPEG est rendu sans être touché — le ré-encoder ne ferait que perdre
+    /// de la qualité pour rien.
+    private static func jpegNormalized(_ data: Data) -> Data? {
+        if isJPEG(data) { return data }
+
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else { return nil }
+
+        let out = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+                  out, "public.jpeg" as CFString, 1, nil)
+        else { return nil }
+
+        CGImageDestinationAddImage(destination, image, [
+            kCGImageDestinationLossyCompressionQuality: 0.9
+        ] as CFDictionary)
+
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return out as Data
     }
 }
