@@ -180,28 +180,14 @@ extension MiloAPIClient {
     /// rejoué : c'est ce qui empêche le rattrapage de la timeline de devenir une
     /// boucle contre un serveur qui a déjà dit non. Un token neuf lève la
     /// consigne — le refus portait sur l'ancien, pas sur l'app.
+    ///
+    /// Sérialisé, parce que la garde n'est pas atomique : lire la consigne, aller
+    /// sur le réseau, puis écrire le verdict laisse une fenêtre où un second
+    /// appel passe aussi. Le lancement et le retour d'inscription APNs arrivent
+    /// justement ensemble — mesuré contre un serveur de test, deux POST
+    /// identiques pour un seul lancement.
     static func registerWidgetToken(_ token: Data) async {
-        let hex = token.map { String(format: "%02x", $0) }.joined()
-        let defaults = UserDefaults(suiteName: appGroupID)
-
-        guard defaults?.string(forKey: registeredWidgetTokenKey) != hex,
-              defaults?.string(forKey: refusedWidgetTokenKey) != hex
-        else { return }
-
-        switch await registerPushToken(token, kind: .widget) {
-        case .registered:
-            defaults?.set(hex, forKey: registeredWidgetTokenKey)
-            defaults?.removeObject(forKey: refusedWidgetTokenKey)
-            defaults?.removeObject(forKey: refusalDetailKey)
-        case .refused(let detail):
-            // Consigné plutôt que tu : sans cette trace, un désaccord de forme
-            // reste aussi muet que celui qu'on vient de passer des heures à
-            // trouver.
-            defaults?.set(hex, forKey: refusedWidgetTokenKey)
-            defaults?.set(detail, forKey: refusalDetailKey)
-        case .unavailable:
-            break // Milō est peut-être éteint : la timeline repassera.
-        }
+        await WidgetTokenRegistrar.shared.register(token)
     }
 
     /// Retire un token du registre — quand la dernière instance d'un widget
@@ -236,5 +222,58 @@ extension MiloAPIClient {
     static func reconcileWidgetPushToken() async {
         guard let info = await WidgetCenter.shared.currentPushInfo else { return }
         await registerWidgetToken(info.token)
+    }
+}
+
+
+/// Sérialise l'enregistrement du token widget.
+///
+/// Un acteur seul ne suffit pas, et c'est le piège : `await` à l'intérieur d'une
+/// méthode d'acteur relâche l'isolation, si bien qu'un second appel entre
+/// pendant que le premier est encore sur le réseau. Mesuré contre un serveur de
+/// test — deux POST identiques pour un lancement, acteur ou pas, parce que les
+/// deux avaient lu la consigne avant que l'un écrive son verdict.
+///
+/// Ce qui marche, c'est de retenir la tentative en vol : le second appelant la
+/// rejoint au lieu d'en ouvrir une seconde, puis exécute la sienne — qui relit
+/// la consigne que le premier vient d'écrire et s'arrête sans rien envoyer.
+private actor WidgetTokenRegistrar {
+    static let shared = WidgetTokenRegistrar()
+
+    private var inFlight: Task<Void, Never>?
+
+    func register(_ token: Data) async {
+        if let current = inFlight {
+            await current.value
+        }
+        let task = Task { await Self.perform(token) }
+        inFlight = task
+        await task.value
+        inFlight = nil
+    }
+
+    /// Lit la consigne, interroge Milō, écrit le verdict.
+    private static func perform(_ token: Data) async {
+        let hex = token.map { String(format: "%02x", $0) }.joined()
+        let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID)
+
+        guard defaults?.string(forKey: MiloAPIClient.registeredWidgetTokenKey) != hex,
+              defaults?.string(forKey: MiloAPIClient.refusedWidgetTokenKey) != hex
+        else { return }
+
+        switch await MiloAPIClient.registerPushToken(token, kind: .widget) {
+        case .registered:
+            defaults?.set(hex, forKey: MiloAPIClient.registeredWidgetTokenKey)
+            defaults?.removeObject(forKey: MiloAPIClient.refusedWidgetTokenKey)
+            defaults?.removeObject(forKey: MiloAPIClient.refusalDetailKey)
+        case .refused(let detail):
+            // Consigné plutôt que tu : sans cette trace, un désaccord de forme
+            // reste aussi muet que celui qu'on vient de passer des heures à
+            // trouver.
+            defaults?.set(hex, forKey: MiloAPIClient.refusedWidgetTokenKey)
+            defaults?.set(detail, forKey: MiloAPIClient.refusalDetailKey)
+        case .unavailable:
+            break // Milō est peut-être éteint : la timeline repassera.
+        }
     }
 }
