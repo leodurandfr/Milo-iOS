@@ -21,13 +21,13 @@ enum MiloPushToStart {
     @MainActor
     static func begin() {
         if let token = RemoteMediaSession<MiloSessionAttributes>.pushToStartToken {
-            Task { await MiloAPIClient.registerPushToken(token, kind: .pushToStart) }
+            Task { _ = await MiloAPIClient.registerPushToken(token, kind: .pushToStart) }
         }
 
         let updates = RemoteMediaSession<MiloSessionAttributes>.pushToStartTokenUpdates
         Task {
             for await token in updates {
-                await MiloAPIClient.registerPushToken(token, kind: .pushToStart)
+                _ = await MiloAPIClient.registerPushToken(token, kind: .pushToStart)
             }
         }
     }

@@ -21,9 +21,48 @@ extension MiloAPIClient {
         case widget
         case pushToStart = "push_to_start"
         case session
+
+        /// L'hôte APNs auquel ce token répond — et il ne se déduit **pas** de
+        /// l'entitlement du build.
+        ///
+        /// Mesuré le 19/09/2026 contre le vrai service, depuis le Pi, sur un
+        /// build Debug signé `aps-environment: development` :
+        ///
+        /// | token           | sandbox          | production       |
+        /// |-----------------|------------------|------------------|
+        /// | `widget`        | **200**          | `BadDeviceToken` |
+        /// | `push_to_start` | `BadDeviceToken` | **200**          |
+        /// | `session`       | `BadDeviceToken` | **200**          |
+        ///
+        /// Les deux tokens du framework `NowPlaying` sont donc des tokens de
+        /// **production**, sur un build de développement. Ce n'est pas une
+        /// anomalie : ils ne viennent pas de l'inscription APNs de l'app, mais
+        /// de `mediaremoted`, un démon du système qui n'a qu'une seule identité
+        /// APNs — de production. Les journaux le montrent qui les range sous la
+        /// clé `leodurand.Milo-iOS::pushToStart`, dans le même registre que ceux
+        /// de toutes les autres apps de l'appareil, tous en `production`. Le
+        /// token du widget, lui, vient bien de l'app et suit son entitlement.
+        ///
+        /// Viser le mauvais hôte répond `BadDeviceToken` : un 400 que rien ne
+        /// distingue d'un token malformé ni d'un mauvais topic, et c'est ce qui
+        /// a rendu la panne si coûteuse — la clé, le topic et le type de push
+        /// étaient bons depuis le début.
+        ///
+        /// `production` en dur ne fait courir aucun risque à un build App Store,
+        /// où c'est déjà la seule réponse possible.
+        var apnsEnvironment: String? {
+            switch self {
+            case .widget: return MiloAPIClient.apsEnvironment()
+            case .pushToStart, .session: return "production"
+            }
+        }
     }
 
     /// Environnement APNs déduit de l'entitlement `aps-environment` du build.
+    ///
+    /// **Ne vaut que pour le token du widget** — le seul que l'app obtienne par
+    /// sa propre inscription APNs, et donc le seul qui suive son entitlement.
+    /// Voir `PushTokenKind.apnsEnvironment` pour les deux autres.
     ///
     /// Jamais deviné : un token de build Debug n'est valide que contre
     /// `api.sandbox.push.apple.com`, et viser le mauvais hôte répond
@@ -131,9 +170,10 @@ extension MiloAPIClient {
                                   sessionID: String? = nil) async -> PushRegistrationOutcome {
         let hex = token.map { String(format: "%02x", $0) }.joined()
 
-        guard let environment = apsEnvironment() else {
+        guard let environment = kind.apnsEnvironment else {
             // Le profil est illisible (simulateur). Rien d'utile à envoyer, et
-            // rien qu'un réessai corrigerait sur ce build.
+            // rien qu'un réessai corrigerait sur ce build. Ne concerne que le
+            // widget : les deux autres familles répondent sans lire de profil.
             return .refused("aps-environment illisible")
         }
 
@@ -166,6 +206,18 @@ extension MiloAPIClient {
             return .registered
         }
 
+        // Tous les 4xx ne sont pas des jugements sur la requête.
+        //
+        // Un **404** dit que la route n'existe pas sur *ce* Milō — un backend
+        // antérieur à `/api/push/tokens`. C'est précisément le cas que
+        // `reconcileWidgetPushToken` existe pour rattraper : le ranger parmi les
+        // refus définitifs condamnait le widget à rester muet même après la mise
+        // à jour du backend, puisque plus rien ne réessayait. **408** et **429**
+        // sont transitoires par définition.
+        //
+        // Restent les vrais refus de forme — 400, 422 — qu'un réessai ne
+        // corrigera jamais.
+        if [404, 408, 429].contains(http.statusCode) { return .unavailable }
         guard (400..<500).contains(http.statusCode) else { return .unavailable }
 
         // Le corps du 422 nomme le champ fautif et les valeurs admises. Le garder
@@ -196,6 +248,27 @@ extension MiloAPIClient {
     @discardableResult
     static func unregisterPushToken(_ token: Data) async -> Bool {
         let hex = token.map { String(format: "%02x", $0) }.joined()
+
+        // Oublier le verdict **avant** de partir sur le réseau, et quel que soit
+        // ce que Milō répondra.
+        //
+        // `registerWidgetToken` ne réenvoie pas un token dont il a noté qu'il
+        // était déjà enregistré. Garder cette note après avoir retiré le token
+        // rendait le retrait irréversible : reposer le widget rend le *même*
+        // token, que la note fait alors tenir pour déjà connu — et il ne repart
+        // jamais. Le push widget restait mort jusqu'à la réinstallation.
+        //
+        // Effacer inconditionnellement est le choix sûr : si le DELETE échoue,
+        // on aura au pire un POST de plus, que Milō traite de façon idempotente.
+        let defaults = UserDefaults(suiteName: appGroupID)
+        if defaults?.string(forKey: registeredWidgetTokenKey) == hex {
+            defaults?.removeObject(forKey: registeredWidgetTokenKey)
+        }
+        if defaults?.string(forKey: refusedWidgetTokenKey) == hex {
+            defaults?.removeObject(forKey: refusedWidgetTokenKey)
+            defaults?.removeObject(forKey: refusalDetailKey)
+        }
+
         guard let url = URL(string: baseURL() + "/api/push/tokens/\(hex)") else { return false }
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
