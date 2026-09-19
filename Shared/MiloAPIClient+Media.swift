@@ -12,31 +12,28 @@ extension MiloAPIClient {
     enum TransportCommand {
         case play, pause, playPause, next, previous
 
-        /// Chaque source a sa propre table de commandes, et la radio n'a rien de
-        /// commun avec les autres : elle n'accepte que `play_station`, `stop` et
-        /// `resume_playback`. Lui envoyer `pause` ou `resume` la laissait inerte,
-        /// puisqu'une commande inconnue est simplement refusée.
+        /// Chaque source a sa propre table de commandes, et la radio ne partage
+        /// pas celle des autres pour la lecture : lui envoyer `pause` ou
+        /// `resume` la laissait inerte, puisqu'une commande inconnue est
+        /// simplement refusée.
         ///
         /// Un flux ne se met pas en pause, il s'arrête : mettre `stop` derrière
         /// le bouton pause est ce que l'appareil fait déjà de son côté, et la
         /// reprise relance la station.
+        ///
+        /// `next` et `prev`, en revanche, portent désormais le même nom qu'aux
+        /// autres sources : Milō les accepte en radio. Ce n'est pas un changement
+        /// de piste — un flux live n'en a pas — mais un saut dans la liste des
+        /// stations favorites, que l'appareil fait boucler dans les deux sens.
         func name(forSource source: String) -> String? {
-            guard source == "radio" else {
-                switch self {
-                case .play: return "resume"
-                case .pause: return "pause"
-                case .playPause: return "playpause"
-                case .next: return "next"
-                case .previous: return "prev"
-                }
-            }
+            let isRadio = source == "radio"
             switch self {
-            case .play: return "resume_playback"
-            case .pause: return "stop"
-            // `playpause` n'existe pas côté radio, et `next`/`previous` n'y sont
-            // pas des commandes : ils changent de station, ce qui passe par
-            // `play_station` et se traite ailleurs.
-            case .playPause, .next, .previous: return nil
+            case .play: return isRadio ? "resume_playback" : "resume"
+            case .pause: return isRadio ? "stop" : "pause"
+            // Seul `playpause` n'a pas d'équivalent en radio.
+            case .playPause: return isRadio ? nil : "playpause"
+            case .next: return "next"
+            case .previous: return "prev"
             }
         }
     }
@@ -55,63 +52,17 @@ extension MiloAPIClient {
     }
 
     /// Envoie une commande de transport. Sans effet si aucune source n'est active.
+    ///
+    /// Une unité qui ne connaît pas encore `next`/`prev` en radio répond HTTP
+    /// 400 : un refus propre, que ce chemin ignore comme tous les autres codes.
+    /// Le bouton ne fait alors rien, exactement comme avant que la commande
+    /// existe.
     static func fireTransport(_ command: TransportCommand) async {
-        guard let source = await activeSource() else { return }
-
-        // En radio, précédent et suivant ne sont pas des commandes de transport :
-        // ils font défiler les stations favorites.
-        if source == "radio", command == .next || command == .previous {
-            await stepFavoriteStation(forward: command == .next)
-            return
-        }
-
-        guard let name = command.name(forSource: source) else { return }
+        guard let source = await activeSource(),
+              let name = command.name(forSource: source)
+        else { return }
         let body = try? JSONSerialization.data(withJSONObject: ["command": name])
         _ = try? await post(path: "/api/audio/control/\(source)", body: body)
-    }
-
-    /// Passe à la station favorite voisine, en boucle.
-    ///
-    /// Un flux n'a ni piste précédente ni piste suivante ; les deux boutons
-    /// resteraient donc morts. Les faire défiler les favoris leur rend un sens
-    /// évident depuis l'écran verrouillé, là où ouvrir l'app pour changer de
-    /// station coûte bien plus cher.
-    private static func stepFavoriteStation(forward: Bool) async {
-        async let stateTask = get(path: "/api/audio/state")
-        async let listTask = get(path: "/api/radio/stations?favorites_only=true", timeout: 6)
-
-        guard let stateData = try? await stateTask,
-              let state = try? JSONSerialization.jsonObject(with: stateData) as? [String: Any],
-              let metadata = state["metadata"] as? [String: Any],
-              let currentID = metadata["station_id"] as? String,
-              let listData = try? await listTask,
-              let list = try? JSONSerialization.jsonObject(with: listData) as? [String: Any],
-              let stations = list["stations"] as? [[String: Any]],
-              !stations.isEmpty
-        else { return }
-
-        // Filtrer les stations elles-mêmes, plutôt que d'en extraire une liste
-        // d'identifiants à côté.
-        //
-        // Un `compactMap` sur les seuls `id` donne une liste plus courte que
-        // `stations` dès qu'un favori n'en porte pas, et les deux sont ensuite
-        // indexées du même entier : on enverrait alors l'identifiant d'une
-        // station avec le corps d'une autre — et Milō jouerait la mauvaise.
-        // Garder un seul tableau rend le décalage impossible à écrire.
-        let usable = stations.filter { $0["id"] is String }
-        guard let index = usable.firstIndex(where: { $0["id"] as? String == currentID })
-        else { return }
-
-        // Modulo plutôt que borne : arrivé au bout de la liste, on revient au
-        // début. Un bouton qui ne fait rien une fois sur vingt-deux serait pris
-        // pour une panne.
-        let station = usable[(index + (forward ? 1 : -1) + usable.count) % usable.count]
-        guard let nextID = station["id"] as? String else { return }
-        let body = try? JSONSerialization.data(withJSONObject: [
-            "command": "play_station",
-            "data": ["station_id": nextID, "station": station]
-        ])
-        _ = try? await post(path: "/api/audio/control/radio", body: body, timeout: 6)
     }
 
     /// Déplace la tête de lecture. Milō attend des millisecondes ; le système,
