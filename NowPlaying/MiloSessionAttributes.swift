@@ -51,6 +51,23 @@ struct MiloSessionAttributes: RemoteMediaSessionAttributes {
         let volume: Float
     }
 
+    /// Les mêmes attributs sous l'identifiant d'une autre session.
+    ///
+    /// `RemoteMediaSession.update(_:)` refuse des attributs dont l'`id` ne
+    /// correspond pas au sien, et une session adoptée porte celui que Milō a
+    /// minté — voir `MiloNowPlayingBridge.adoptExistingSession`. On ne fabrique
+    /// donc plus l'identifiant à la source : on le repose sur le chemin.
+    func with(id: String) -> MiloSessionAttributes {
+        MiloSessionAttributes(
+            id: id,
+            isPlaying: isPlaying,
+            elapsedTime: elapsedTime,
+            timestamp: timestamp,
+            currentTrack: currentTrack,
+            devices: devices
+        )
+    }
+
     /// `timestamp` est porté en `String` plutôt qu'en `Date`, délibérément.
     ///
     /// C'est le système qui décode ce type, et la stratégie de date de son

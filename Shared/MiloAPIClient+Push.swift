@@ -155,6 +155,109 @@ extension MiloAPIClient {
         case unavailable
     }
 
+    /// Ce que l'extension n'a pas pu enregistrer elle-même.
+    ///
+    /// L'extension est le seul endroit d'où le token d'une session est lisible,
+    /// et le plus mauvais d'où le poster. Son processus vit quelques
+    /// millisecondes, et elle n'atteint Milō que par `milo.local` : la connexion
+    /// directe à l'IP lui est refusée — `Path was denied by NECP policy`, et le
+    /// second essai ne passe pas davantage, mesuré `ip=KO(-1009) ip2=KO(-1009)`
+    /// le 19/09/2026. Il ne lui reste que la résolution mDNS, qui répond en 2 ms
+    /// la plupart du temps et jamais de temps en temps.
+    ///
+    /// Ce que coûtait cet échec : `token 8a3983dc rotation → unavailable` à
+    /// 18:13:49, puis Milō déclarant la session inadressable et en ouvrant une
+    /// rivale à 18:15:25. Le téléphone tenait alors deux sessions, le système en
+    /// affichait une et Milō nourrissait l'autre, et les commandes tombaient sur
+    /// une session sans objet vivant derrière — « Completed command » en 23 ms
+    /// sans que rien de notre code ne s'exécute.
+    ///
+    /// L'extension écrit donc, et l'app poste. Une écriture dans le conteneur
+    /// partagé ne peut pas échouer sur un réseau qu'elle n'emprunte pas, et
+    /// l'app est un processus long qui atteint Milō de façon fiable.
+    static let pendingSessionTokenKey = "milo_pending_session_token"
+
+    /// Dépose le couple à enregistrer. Appelé par l'extension, synchrone.
+    static func notePendingSessionToken(_ token: Data, sessionID: String) {
+        let hex = token.map { String(format: "%02x", $0) }.joined()
+        UserDefaults(suiteName: appGroupID)?
+            .set("\(sessionID)/\(hex)", forKey: pendingSessionTokenKey)
+    }
+
+    /// Poste ce que l'extension a déposé. Appelé par l'app, à chaque passe.
+    ///
+    /// N'efface qu'en cas de succès : un refus de forme comme une panne réseau
+    /// doivent pouvoir être rejoués, sinon l'enregistrement d'une session serait
+    /// perdu pour de bon sur un seul échec — la panne qu'on répare ici.
+    static func drainPendingSessionToken() async {
+        let defaults = UserDefaults(suiteName: appGroupID)
+        guard let raw = defaults?.string(forKey: pendingSessionTokenKey),
+              let separator = raw.firstIndex(of: "/")
+        else { return }
+
+        let sessionID = String(raw[raw.startIndex..<separator])
+        let hex = String(raw[raw.index(after: separator)...])
+        guard !sessionID.isEmpty, let token = Data(hexString: hex) else {
+            defaults?.removeObject(forKey: pendingSessionTokenKey)
+            return
+        }
+
+        if case .registered = await registerPushToken(
+            token, kind: .session, sessionID: sessionID) {
+            defaults?.removeObject(forKey: pendingSessionTokenKey)
+        }
+    }
+
+    /// La consigne « ce token est déjà enregistré », datée du démarrage.
+    ///
+    /// Le token seul ne suffisait pas. Un redémarrage détruit les sessions du
+    /// téléphone sans rien changer au token du widget, si bien que la consigne
+    /// tenait toujours et que plus aucun POST ne partait — Milō n'avait donc
+    /// aucune occasion d'apprendre le redémarrage. Y joindre l'heure de
+    /// démarrage fait repartir **exactement un** POST par redémarrage, sur la
+    /// première timeline que WidgetKit accorde, et c'est lui qui porte la
+    /// nouvelle. Le widget tourne sans que l'app soit lancée ; c'est tout
+    /// l'intérêt de le faire passer par là.
+    static func widgetStamp(_ hex: String) -> String { "\(hex)/\(Int(bootTime()))" }
+
+    /// Depuis quand ce téléphone est allumé, en secondes Unix.
+    ///
+    /// C'est la seule chose que le téléphone puisse dire à Milō pour lui
+    /// apprendre que ses sessions ont disparu, et elle ne coûte rien.
+    ///
+    /// Un redémarrage détruit toutes les sessions Now Playing, et **rien ne
+    /// l'annonce** : Milō garde en mémoire une session qu'il croit vivante et
+    /// continue de lui pousser des `update` qu'APNs accepte — 200, destination
+    /// inexistante, aucune erreur nulle part. Mesuré le 19/09/2026 : téléphone
+    /// redémarré avec la musique en cours, plus rien sur l'écran verrouillé, et
+    /// pas un seul `start` envoyé.
+    ///
+    /// Le téléphone ne peut pas se réparer lui-même : `RemoteMediaSession` est
+    /// `@available(iOSApplicationExtension, unavailable)`, donc ni le widget ni
+    /// l'extension ne peuvent ouvrir ni adopter une session — seule l'app au
+    /// premier plan le peut. Il peut en revanche *signaler*, et ce champ voyage
+    /// dans un POST qui partait déjà.
+    ///
+    /// `KERN_BOOTTIME` plutôt qu'un identifiant tiré au sort et rangé quelque
+    /// part : la valeur est fournie par le noyau, la même pour tous les
+    /// processus du bundle, et elle survit à ce que nous n'écrivons pas.
+    static func bootTime() -> Double {
+        var boot = timeval()
+        var size = MemoryLayout<timeval>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_BOOTTIME]
+        guard sysctl(&mib, 2, &boot, &size, nil, 0) == 0 else { return 0 }
+        return Double(boot.tv_sec)
+    }
+
+    /// Le couple (session, token) déjà déposé avec succès.
+    ///
+    /// Écrite par l'extension, effacée par l'app à son lancement : la garde
+    /// d'idempotence de `MiloRemoteSession` vit dans le conteneur partagé, donc
+    /// plus longtemps que le registre d'en face, et un registre perdu côté Milō
+    /// la laisserait fermée pour toujours. La clé est déclarée ici parce que les
+    /// deux cibles la touchent et qu'aucune ne voit le code de l'autre.
+    static let sessionTokenStampKey = "milo_session_token_stamp"
+
     /// Dépose un token chez Milō. Idempotent : à appeler à chaque lancement.
     ///
     /// `sessionID` est requis pour `.session` et interdit ailleurs — Milō répond
@@ -181,7 +284,8 @@ extension MiloAPIClient {
             "token": hex,
             "kind": kind.rawValue,
             "environment": environment,
-            "device_id": deviceID()
+            "device_id": deviceID(),
+            "boot_time": bootTime()
         ]
         if let sessionID { body["session_id"] = sessionID }
 
@@ -261,7 +365,7 @@ extension MiloAPIClient {
         // Effacer inconditionnellement est le choix sûr : si le DELETE échoue,
         // on aura au pire un POST de plus, que Milō traite de façon idempotente.
         let defaults = UserDefaults(suiteName: appGroupID)
-        if defaults?.string(forKey: registeredWidgetTokenKey) == hex {
+        if defaults?.string(forKey: registeredWidgetTokenKey)?.hasPrefix(hex) == true {
             defaults?.removeObject(forKey: registeredWidgetTokenKey)
         }
         if defaults?.string(forKey: refusedWidgetTokenKey) == hex {
@@ -328,15 +432,16 @@ private actor WidgetTokenRegistrar {
     /// Lit la consigne, interroge Milō, écrit le verdict.
     private static func perform(_ token: Data) async {
         let hex = token.map { String(format: "%02x", $0) }.joined()
+        let stamp = MiloAPIClient.widgetStamp(hex)
         let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID)
 
-        guard defaults?.string(forKey: MiloAPIClient.registeredWidgetTokenKey) != hex,
+        guard defaults?.string(forKey: MiloAPIClient.registeredWidgetTokenKey) != stamp,
               defaults?.string(forKey: MiloAPIClient.refusedWidgetTokenKey) != hex
         else { return }
 
         switch await MiloAPIClient.registerPushToken(token, kind: .widget) {
         case .registered:
-            defaults?.set(hex, forKey: MiloAPIClient.registeredWidgetTokenKey)
+            defaults?.set(stamp, forKey: MiloAPIClient.registeredWidgetTokenKey)
             defaults?.removeObject(forKey: MiloAPIClient.refusedWidgetTokenKey)
             defaults?.removeObject(forKey: MiloAPIClient.refusalDetailKey)
         case .refused(let detail):
@@ -348,5 +453,23 @@ private actor WidgetTokenRegistrar {
         case .unavailable:
             break // Milō est peut-être éteint : la timeline repassera.
         }
+    }
+}
+
+
+extension Data {
+    /// L'inverse de `map { String(format: "%02x", $0) }.joined()`, qui est la
+    /// forme sous laquelle un token voyage partout ici.
+    init?(hexString: String) {
+        let characters = Array(hexString)
+        guard characters.count % 2 == 0 else { return nil }
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(characters.count / 2)
+        for index in stride(from: 0, to: characters.count, by: 2) {
+            guard let byte = UInt8(String(characters[index...index + 1]), radix: 16)
+            else { return nil }
+            bytes.append(byte)
+        }
+        self.init(bytes)
     }
 }

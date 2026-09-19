@@ -42,10 +42,15 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
 
     /// Le système remet ici les attributs poussés par Milō. Les stocker suffit :
     /// `@Observable` fait remonter le changement à l'interface Now Playing.
+    ///
+    /// Le token est redéposé au passage : voir `startObservingPushToken`, cette
+    /// session n'a qu'un nombre limité d'occasions de le faire aboutir et
+    /// celle-ci en est une.
     func update(_ attributes: MiloSessionAttributes) {
         self.attributes = attributes
         miloLog.info("update reçu \(attributes.id, privacy: .public)")
         Self.trace("update reçu")
+        registerPushTokenIfNeeded(occasion: "update")
     }
 
     // MARK: - Ce qui joue
@@ -151,8 +156,13 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             miloLog.info("cache absent ou vide, repli sur le réseau")
 
             // Repli réseau, mêmes règles : on rend les octets, on ne décode
-            // pas. Il ne sert plus que si l'app n'a pas eu le temps de déposer
-            // le fichier — elle est le chemin nominal depuis 54fc28c.
+            // pas.
+            //
+            // Ce n'est plus un repli rare. Le cache était rempli par l'app, et
+            // l'app dort pendant que l'écran est verrouillé — c'est-à-dire
+            // exactement quand cette extension sert. Mesuré le 19/09/2026 sur
+            // douze minutes d'écran verrouillé : quatre appels au fournisseur,
+            // **zéro** servi par le cache, quatre par le réseau.
             //
             // Le téléchargement est le seul point du fournisseur qui puisse
             // jeter sans qu'on s'en aperçoive : l'erreur remonte au système,
@@ -174,25 +184,76 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             miloLog.info("réseau servi : HTTP \(code, privacy: .public), \(data.count, privacy: .public) o")
             UserDefaults(suiteName: MiloAPIClient.appGroupID)?
                 .set("réseau HTTP \(code) \(data.count)o", forKey: "milo_artwork_trace")
+
+            // Déposé pour la fois d'après, ici et pas ailleurs : c'est le seul
+            // endroit de l'extension que le système attend, donc le seul où une
+            // écriture a le temps d'aboutir. Une tâche détachée lancée depuis
+            // `update(_:)` meurt avec son processus — et il en change à chaque
+            // réveil : cinq processus en sept secondes, mesurés.
+            //
+            // Ce que ça change : le système redemande la même image à plusieurs
+            // reprises, dans des processus différents — `3dffdd56c66f.webp`
+            // redemandé à 17:35:55 puis à 17:35:59 — et chaque demande repayait
+            // les 13 à 50 ms du réseau. Une lecture de fichier en coûte une, et
+            // cette course-là se joue à la milliseconde.
+            //
+            // `.atomic` : sans lui, un processus tué en cours d'écriture
+            // laisserait un fichier tronqué que la branche du dessus lirait
+            // comme valide — non vide — et servirait indéfiniment.
+            if code == 200, !data.isEmpty,
+               let file = MiloAPIClient.artworkCacheFile(for: raw) {
+                try? data.write(to: file, options: .atomic)
+            }
             return try ArtworkRepresentation(data: data)
         }
     }
 
     // MARK: - Commandes
 
+    /// La source que Milō dit jouer, lue dans les attributs plutôt que sur le
+    /// réseau.
+    ///
+    /// Elle voyage dans `currentTrack.id`, sous la forme `<source>:<titre>` —
+    /// c'est le contrat que les deux côtés écrivent déjà : l'app le fabrique
+    /// dans `MiloNowPlayingBridge.buildAttributes`, Milō dans
+    /// `payloads.build_attributes`. Le titre peut contenir des `:`, pas le nom
+    /// de source : on coupe au premier.
+    ///
+    /// Ce qu'elle évite : l'aller-retour `/api/audio/state` que chaque commande
+    /// posait devant son `POST`. Le système n'accorde que trois secondes au
+    /// rappel, et deux requêtes n'y tiennent pas — voir `activeSource()`.
+    ///
+    /// `nil` quand aucune piste n'est annoncée ; l'appelant relit alors, comme
+    /// avant.
+    /// Deux valeurs ne nomment aucune source et rendent `nil` plutôt que de
+    /// partir sur le réseau : `milo`, le bouchon que
+    /// `MiloNowPlayingBridge.buildAttributes` écrit quand `/api/audio/state`
+    /// n'annonce pas de source, et `none`, la façon dont Milō dit lui-même que
+    /// rien ne joue. Les laisser passer frappait
+    /// `/api/audio/control/milo`, une route qui n'existe pas, et la trace
+    /// disait « envoyé » pour une commande qui ne pouvait pas aboutir.
+    private var knownSource: String? {
+        guard let id = attributes.currentTrack?.id,
+              let separator = id.firstIndex(of: ":"), separator > id.startIndex
+        else { return nil }
+        let source = String(id[id.startIndex..<separator])
+        return source == "milo" || source == "none" ? nil : source
+    }
+
     var commands: [MediaCommand] {
-        miloLog.info("commands lu")
+        let source = knownSource
+        miloLog.info("commands lu — source \(source ?? "inconnue", privacy: .public)")
         return [
             .play {
                 miloLog.info("RAPPEL COMMANDE play")
-                await MiloAPIClient.fireTransport(.play)
+                await MiloAPIClient.fireTransport(.play, source: source)
             },
-            .pause { await MiloAPIClient.fireTransport(.pause) },
-            .togglePlayPause { await MiloAPIClient.fireTransport(.playPause) },
-            .next { await MiloAPIClient.fireTransport(.next) },
-            .previous { await MiloAPIClient.fireTransport(.previous) },
+            .pause { await MiloAPIClient.fireTransport(.pause, source: source) },
+            .togglePlayPause { await MiloAPIClient.fireTransport(.playPause, source: source) },
+            .next { await MiloAPIClient.fireTransport(.next, source: source) },
+            .previous { await MiloAPIClient.fireTransport(.previous, source: source) },
             .seekToPosition { position in
-                await MiloAPIClient.fireSeek(toSeconds: position)
+                await MiloAPIClient.fireSeek(toSeconds: position, source: source)
             }
         ]
     }
@@ -230,23 +291,47 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             let ipHost = UserDefaults(suiteName: MiloAPIClient.appGroupID)?
                 .string(forKey: MiloAPIClient.ipAddressKey) ?? ""
 
+            let ipURL = ipHost.isEmpty ? "" : "http://\(ipHost)/api/volume/state"
+
             async let net = probeResult("https://www.apple.com")
-            async let ip = probeResult(
-                ipHost.isEmpty ? "" : "http://\(ipHost)/api/volume/state")
             async let mdns = probeResult("http://milo.local/api/volume/state")
+
+            // L'IP est sondée **deux fois**, et c'est toute la question du jour.
+            //
+            // Le journal système du 19/09/2026 montre que le chemin IPv4 *non
+            // scopé* est refusé — `Path was denied by NECP policy` — tandis que
+            // le chemin IPv4 *scopé sur en0*, essayé quelques millisecondes plus
+            // tard par le même `URLSession`, passe et sert la réponse. C'est
+            // pour ça que `milo.local` marche et que l'IP directe rend -1009 :
+            // un nom produit plusieurs candidats et l'un d'eux tombe après
+            // l'autorisation, une IP n'en produit qu'un.
+            //
+            // Si le second essai répond, l'IP redevient utilisable et `milo.local`
+            // quitte le chemin critique — avec lui, la résolution mDNS qui
+            // consomme parfois les trois secondes du budget d'une commande.
+            // Les deux essais sont séquentiels — c'est tout leur objet — mais
+            // courts : un refus NECP revient en quelques millisecondes, et le
+            // délai ne joue que si Milō est injoignable. Les allonger ferait
+            // dépasser à cette tâche la durée de vie de son propre processus, et
+            // l'écriture ci-dessous n'atterrirait jamais — surtout pas dans le
+            // cas « LAN injoignable » que la sonde existe pour décrire.
+            let ipFirst = await probeResult(ipURL, timeout: 2)
+            let ipSecond = await probeResult(ipURL, timeout: 2)
+
             // Clé dédiée, pas le journal : celui-ci est un tableau réécrit en
             // lecture-modification-écriture par des appelants concurrents, assez
             // sollicité pour en chasser la sonde avant qu'on la lise.
             UserDefaults(suiteName: MiloAPIClient.appGroupID)?.set(
-                "internet=\(await net) ip=\(await ip) mdns=\(await mdns)",
+                "internet=\(await net) ip=\(ipFirst) ip2=\(ipSecond) mdns=\(await mdns)",
                 forKey: "milo_ext_probe")
         }
     }
 
-    nonisolated private static func probeResult(_ raw: String) async -> String {
+    nonisolated private static func probeResult(_ raw: String,
+                                                 timeout: TimeInterval = 5) async -> String {
         guard !raw.isEmpty else { return "aucune IP connue" }
         guard let url = URL(string: raw) else { return "url?" }
-        var r = URLRequest(url: url); r.timeoutInterval = 5
+        var r = URLRequest(url: url); r.timeoutInterval = timeout
         do {
             let (_, response) = try await URLSession.shared.data(for: r)
             return "\((response as? HTTPURLResponse)?.statusCode ?? -1)"
@@ -306,15 +391,24 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// Tant qu'il n'est pas arrivé, Milō n'envoie **aucun** `update` : il n'a pas
     /// d'adresse où les mettre. Ce n'est pas une erreur, c'est l'aller-retour du
     /// protocole — `start` part au token push-to-start, la suite part à celui-ci.
+    ///
+    /// **Cet aller-retour ne se faisait jamais pour une session ouverte par
+    /// Milō.** Mesuré le 19/09/2026 : le registre du Pi ne contenait que des
+    /// identifiants en majuscules, c'est-à-dire des `UUID().uuidString` de
+    /// sessions ouvertes par l'app ; aucun des identifiants que Milō mint en
+    /// `uuid4`. `SESSION CONSTRUITE 87fdc61a-…` à 16:44:16.770, et le seul
+    /// enregistrement arrivé à Milō dans cette seconde portait celui de l'app.
+    /// `token_for_session` rendait donc `None` à chaque cycle et pas un seul
+    /// `update` n'est jamais parti.
+    ///
+    /// D'où la reprise à chaque réveil plutôt qu'au seul `init` : une tâche
+    /// détachée que personne n'attend meurt avec son processus, et celui-ci est
+    /// terminé quelques millisecondes après avoir été lu. Le système réveille
+    /// l'extension sans arrêt — dix-sept processus en trois minutes — si bien
+    /// qu'un enregistrement manqué une fois aboutit au passage suivant. La garde
+    /// d'idempotence le rend gratuit une fois qu'il a abouti.
     private func startObservingPushToken() {
-        let sessionID = id
-
-        if let token = pushToken {
-            Task {
-                _ = await MiloAPIClient.registerPushToken(
-                    token, kind: .session, sessionID: sessionID)
-            }
-        }
+        registerPushTokenIfNeeded(occasion: "init")
 
         // Ne capturer que l'identifiant et le flux — surtout pas `self`.
         //
@@ -323,12 +417,94 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         // boucle tient jusqu'à la fin du processus, ce que le `[weak self]`
         // était précisément censé empêcher. Le corps n'a besoin de rien d'autre
         // que `sessionID`, donc il ne capture rien d'autre.
+        let sessionID = id
         let updates = pushTokenUpdates
         Task {
             for await token in updates {
-                _ = await MiloAPIClient.registerPushToken(
-                    token, kind: .session, sessionID: sessionID)
+                // Par la garde, comme les autres. Sans elle ce flux redéposait
+                // le même token à chaque réveil — deux POST par changement de
+                // station, mesurés dans le journal de Milō — et chacun pris sur
+                // les quelques millisecondes que vit ce processus.
+                guard Self.lastRegistered != Self.stamp(sessionID, token) else { continue }
+                MiloAPIClient.notePendingSessionToken(token, sessionID: sessionID)
+                await Self.register(token, for: sessionID, occasion: "rotation")
             }
         }
+    }
+
+    /// Dépose le token courant s'il n'a pas déjà abouti pour cette session.
+    private func registerPushTokenIfNeeded(occasion: String) {
+        let sessionID = id
+        guard let token = pushToken else {
+            // Tracé, parce que c'est l'hypothèse qui reste à départager : un
+            // token pas encore frappé au moment de la construction n'est pas la
+            // même panne qu'un enregistrement qui part et n'arrive pas.
+            miloLog.info("""
+                token de session absent (\(occasion, privacy: .public)) \
+                \(sessionID, privacy: .public)
+                """)
+            return
+        }
+        guard Self.lastRegistered != Self.stamp(sessionID, token) else { return }
+
+        // Déposé pour l'app **avant** toute tentative réseau, et de façon
+        // synchrone : c'est la seule branche qui aboutisse à coup sûr dans un
+        // processus que le système termine quelques millisecondes plus tard.
+        MiloAPIClient.notePendingSessionToken(token, sessionID: sessionID)
+
+        // L'essai direct reste, derrière. Quand mDNS répond — c'est le cas le
+        // plus fréquent — Milō a le token tout de suite plutôt qu'au prochain
+        // passage de l'app au premier plan.
+        Task { await Self.register(token, for: sessionID, occasion: occasion) }
+    }
+
+    /// L'envoi, et ce qu'il en advient.
+    ///
+    /// Le verdict est retenu : seul un succès arme la garde d'idempotence. Un
+    /// refus ou une panne réseau doit pouvoir être rejoué au réveil suivant,
+    /// sinon la garde transformerait un échec unique en silence définitif —
+    /// exactement la panne qu'on répare ici.
+    nonisolated private static func register(_ token: Data,
+                                             for sessionID: String,
+                                             occasion: String) async {
+        let outcome = await MiloAPIClient.registerPushToken(
+            token, kind: .session, sessionID: sessionID)
+        switch outcome {
+        case .registered:
+            lastRegistered = stamp(sessionID, token)
+            miloLog.info("""
+                token de session déposé (\(occasion, privacy: .public)) \
+                \(sessionID, privacy: .public)
+                """)
+        case .refused(let detail):
+            miloLog.error("token de session refusé : \(detail, privacy: .public)")
+        case .unavailable:
+            miloLog.error("token de session : Milō injoignable")
+        }
+        trace("token \(sessionID) \(occasion) → \(outcome)")
+    }
+
+    /// Ce qui a déjà abouti, dans le conteneur partagé : la garde doit survivre
+    /// au processus, qui ne vit que quelques millisecondes.
+    ///
+    /// Elle survit *trop* pour être laissée seule. Si Milō perd son registre —
+    /// fichier effacé, restauration, réinstallation — plus aucun `update` ne
+    /// vient, donc l'occasion « update » ne se présente plus, et l'`init` est
+    /// gardé : la session cesserait d'être enregistrable pour toujours, sans
+    /// rien qui le signale. `MiloPushToStart.begin()` remet donc le compteur à
+    /// zéro à chaque lancement de l'app, qui est déjà le moment où elle
+    /// redéclare ses autres tokens. Coût : un POST par lancement.
+    nonisolated private static var lastRegistered: String? {
+        get { UserDefaults(suiteName: MiloAPIClient.appGroupID)?
+                .string(forKey: MiloAPIClient.sessionTokenStampKey) }
+        set { UserDefaults(suiteName: MiloAPIClient.appGroupID)?
+                .set(newValue, forKey: MiloAPIClient.sessionTokenStampKey) }
+    }
+
+    /// Le couple (session, token) : c'est leur *paire* qui doit changer pour
+    /// qu'un nouvel envoi soit dû. Le token seul rotationne sans changer de
+    /// session, et une session nouvelle réutilise parfois le même token.
+    nonisolated private static func stamp(_ sessionID: String, _ token: Data) -> String {
+        "\(sessionID)/\(token.map { String(format: "%02x", $0) }.joined())"
     }
 }

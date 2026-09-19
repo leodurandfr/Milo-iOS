@@ -23,6 +23,15 @@ enum MiloNowPlayingBridge {
 
     private static var pump: Task<Void, Never>?
 
+    /// Les sessions dont on a constaté qu'elles refusent leurs `update`.
+    ///
+    /// Un ensemble, et pas un seul identifiant : `sessions()` peut en énumérer
+    /// plusieurs mortes à la fois, et n'en écarter qu'une ferait reprendre la
+    /// suivante au tour d'après. Vidé dès qu'un `update` aboutit — un
+    /// identifiant écarté pour toujours interdirait de reprendre une session
+    /// que le système aurait légitimement rouverte sous le même nom.
+    private static var disowned: Set<String> = []
+
     /// Ce qui, dans les attributs, change réellement ce qui est affiché.
     private static var lastSignature = ""
 
@@ -93,18 +102,22 @@ enum MiloNowPlayingBridge {
     ///
     /// Sans ça, la session gardait ce qui était vrai au lancement : on voyait
     /// encore la piste Spotify d'avant pendant que la bibliothèque musicale
-    /// jouait. Le vrai entretien, à terme, ce sont les `update` poussés par
-    /// Milō ; cette boucle est ce qui tient pendant que l'app est ouverte, et
-    /// elle s'arrête dès qu'elle ne l'est plus — interroger Milō toutes les deux
-    /// secondes depuis l'arrière-plan ne servirait qu'à vider la batterie.
+    /// jouait.
+    ///
+    /// Cette boucle ne tient que pendant que l'app est ouverte, et elle s'arrête
+    /// dès qu'elle ne l'est plus — interroger Milō toutes les deux secondes
+    /// depuis l'arrière-plan ne servirait qu'à vider la batterie. Le relais,
+    /// c'est le push : Milō pousse ses `update` à la session, et c'est ce qui
+    /// tient l'écran verrouillé. Tant que ce relais était muet, l'arrêt de cette
+    /// boucle *était* le gel de l'affichage — voir `reconcileSession`, qui est
+    /// la moitié de ce qui l'empêchait de fonctionner.
     ///
     /// `startPump` part de **deux** endroits — `didFinishLaunching` et
     /// `sceneDidBecomeActive` — et les deux se suivent de près au démarrage à
     /// froid. Annuler la boucle précédente ne suffit pas : l'annulation n'arrête
     /// pas un `refresh()` déjà engagé au-delà de ses `await`, si bien que deux
-    /// passes pouvaient se chevaucher — deux `RemoteMediaSession.start`
-    /// concurrents, ou un balayage des sessions résiduelles qui ferme celle que
-    /// l'autre venait tout juste de stocker.
+    /// passes pouvaient se chevaucher, et se disputer la session qu'elles
+    /// tiennent.
     ///
     /// La nouvelle boucle attend donc que l'ancienne ait vraiment rendu la main
     /// avant de commencer. `refresh()` n'est jamais réentrant.
@@ -136,6 +149,12 @@ enum MiloNowPlayingBridge {
     }
 
     static func refresh() async {
+        // Ce que l'extension n'a pas pu enregistrer elle-même — voir
+        // `MiloAPIClient.pendingSessionTokenKey`. Sans token, Milō ne peut pas
+        // pousser ses `update` à la session, la déclare inadressable, et en
+        // ouvre une rivale que le système n'affiche pas.
+        await MiloAPIClient.drainPendingSessionToken()
+
         guard let attributes = await buildAttributes() else {
             note("pas d'état exploitable depuis Milō")
             return
@@ -156,48 +175,95 @@ enum MiloNowPlayingBridge {
         // passe, avant toute sortie anticipée.
         let jumped = positionJumped(attributes)
         let signature = displaySignature(attributes)
-        if session != nil, signature == lastSignature, !jumped { return }
+
+        // Réconcilier d'abord, et à **chaque** passe.
+        //
+        // L'app se contentait d'adopter quand elle ne tenait rien, puis gardait
+        // sa prise pour toujours. Milō, lui, termine et rouvre des sessions
+        // selon ce qui joue : l'app restait alors accrochée à une session morte
+        // de son côté pendant que la vivante, invisible, recevait tout.
+        await reconcileSession()
+
+        guard let session else {
+            note("aucune session ouverte par Milō")
+            return
+        }
+
+        // Ne pousser que ce qui change l'affichage.
+        //
+        // Pousser toutes les deux secondes faisait reconstruire la session à
+        // chaque fois — mesuré, quatre fois en deux secondes — et chaque
+        // reconstruction jette l'objet `Artwork` en cours avec son
+        // téléchargement : la pochette n'avait jamais le temps d'arriver.
+        //
+        // La position n'entre pas dans la signature, délibérément : elle change
+        // en permanence, et `MediaPlaybackSnapshot` porte déjà un horodatage à
+        // partir duquel le système interpole. L'annoncer à chaque seconde ne
+        // dirait rien de plus et coûterait tout.
+        if signature == lastSignature, !jumped { return }
 
         do {
-            if let session {
-                do {
-                    try await session.update(attributes)
-                } catch {
-                    // Une session que Milō ou le système a close continue de
-                    // refuser chaque `update`. La garder rendait la branche
-                    // `start` inatteignable pour toujours : l'écran verrouillé
-                    // restait vide jusqu'au prochain lancement de l'app. On la
-                    // lâche, et la passe suivante en rouvre une.
-                    Self.session = nil
-                    lastSignature = ""
-                    note("update refusé, session lâchée : \(error)")
-                    return
-                }
-                lastSignature = signature
-                note("update ok (\(attributes.id))")
-            } else {
-                // Terminer ce qui traîne avant d'ouvrir. Le framework met en
-                // cache les sessions rendues par l'extension et leur route les
-                // mises à jour suivantes : une session ouverte par un lancement
-                // précédent survit, et le système continue de parler à
-                // l'instance d'alors — avec le code d'alors. En développement ça
-                // fait exécuter une version périmée de l'extension ; en usage
-                // normal ça laisse une session orpheline que plus personne
-                // n'entretient.
-                for stale in try await RemoteMediaSession<MiloSessionAttributes>.sessions() {
-                    try? await stale.end()
-                }
-
-                let fresh = try await RemoteMediaSession.start(attributes: attributes)
-                session = fresh
-                // Ne vaut que depuis le premier plan : en arrière-plan la
-                // demande est ignorée, sans erreur.
-                try await fresh.requestToBecomeSystemPrimary()
-                lastSignature = signature
-                note("start ok (\(attributes.id)), primary demandé")
-            }
+            // L'identifiant est celui de la session, jamais le nôtre :
+            // `update(_:)` refuse des attributs qui n'en portent pas le sien.
+            try await session.update(attributes.with(id: session.id))
+            lastSignature = signature
+            disowned.removeAll()
+            note("update ok (\(session.id))")
         } catch {
-            note("échec : \(error)")
+            // Une session que Milō ou le système a close continue de refuser
+            // chaque `update`. On la lâche, et son identifiant est retenu :
+            // `sessions()` peut continuer de l'énumérer, et la réconciliation
+            // la reprendrait au tour suivant — on refuserait alors en boucle.
+            Self.session = nil
+            disowned.insert(session.id)
+            lastSignature = ""
+            note("update refusé, session lâchée : \(error)")
+        }
+    }
+
+    /// Aligne ce qu'on tient sur ce que le système tient, et réclame l'écran.
+    ///
+    /// **L'app n'ouvre plus de session.** Elle l'a fait, et c'était la rivalité
+    /// qu'on croyait supprimer : mesuré le 19/09/2026 à 17:46:30, deux sessions
+    /// vivantes en même temps — `9AA6ACC5`, ouverte ici, principale et donc
+    /// seule visible, mais que Milō avait déjà terminée de son côté ; et
+    /// `7e148d0e`, ouverte par le push de Milō, qui recevait tous les `update`
+    /// sans que personne ne les voie. Une session ouverte par push ne peut pas
+    /// réclamer l'écran elle-même — `requestToBecomeSystemPrimary()` exige le
+    /// premier plan, et quand elle naît l'app dort. La seule qui pouvait le
+    /// faire était donc celle qu'il ne fallait pas.
+    ///
+    /// Milō est propriétaire du cycle de vie ; l'app ne fait que suivre, et
+    /// pousse ses `update` sur le LAN tant qu'elle est ouverte parce que c'est
+    /// plus rapide qu'un aller-retour par Apple. Quand rien n'est ouvert, il n'y
+    /// a rien à afficher et rien à faire : Milō pousse un `start` dès que la
+    /// lecture reprend.
+    private static func reconcileSession() async {
+        let all = (try? await RemoteMediaSession<MiloSessionAttributes>.sessions()) ?? []
+        let existing = all.filter { !disowned.contains($0.id) }
+
+        guard let live = existing.first(where: { $0.isSystemPrimary }) ?? existing.first else {
+            if session != nil { note("session disparue") }
+            session = nil
+            return
+        }
+
+        if live.id != session?.id {
+            session = live
+            // La signature décrit ce qu'on a poussé à la session d'avant ; sur
+            // une autre elle ne vaut rien, et la garder sauterait la première
+            // mise à jour de la nouvelle.
+            lastSignature = ""
+            note("session adoptée (\(live.id))")
+        }
+
+        // Réclamé tant que ce n'est pas obtenu. Une seule demande ne suffit
+        // pas : `startPump()` part aussi de `didFinishLaunching`, où la scène
+        // n'est pas encore active et où la demande est ignorée sans erreur —
+        // c'est ce qui obligeait à lancer l'app **deux** fois pour voir la
+        // carte apparaître.
+        if !live.isSystemPrimary {
+            try? await live.requestToBecomeSystemPrimary()
         }
     }
 
@@ -265,9 +331,11 @@ enum MiloNowPlayingBridge {
         }
 
         return MiloSessionAttributes(
-            // Stable tant que l'app vit : la session survit au changement de
-            // piste et de source, elle ne se rouvre pas à chaque morceau.
-            id: sessionID,
+            // Place tenue, jamais envoyée telle quelle : `refresh()` la remplace
+            // par l'identifiant de la session qu'il tient, seul que
+            // `update(_:)` accepte. L'app n'en mint plus aucun — voir
+            // `reconcileSession`.
+            id: "",
             isPlaying: isPlaying,
             elapsedTime: positionMS / 1000,
             timestamp: ISO8601DateFormatter().string(from: .now),
@@ -275,8 +343,6 @@ enum MiloNowPlayingBridge {
             devices: await buildDevices()
         )
     }
-
-    private static let sessionID = UUID().uuidString
 
     /// Un device par client snapcast, avec son vrai nom.
     ///

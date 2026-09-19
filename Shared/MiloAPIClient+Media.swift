@@ -41,39 +41,137 @@ extension MiloAPIClient {
     /// Source active du moment, telle que `/api/audio/state` la nomme.
     ///
     /// `/api/audio/control/{source}` s'adresse à une source précise : il n'existe
-    /// pas de « commande au système ». On relit donc la source courante juste
-    /// avant, plutôt que de mémoriser celle du dernier push — elle peut avoir
-    /// changé sous nos pieds, et la session survit justement à ce changement.
+    /// pas de « commande au système ».
+    ///
+    /// **Chemin de repli, plus le chemin nominal.** Cet aller-retour-là était
+    /// posé devant chaque commande, et c'est lui qui les faisait échouer :
+    /// `mediaremoted` accorde trois secondes à un rappel de commande (mesuré le
+    /// 19/09/2026 — `Completed command (3.0s)`, puis `Allowing extra 1.0s`), et
+    /// deux requêtes de trois secondes chacune n'y tiennent pas. Quand la
+    /// résolution mDNS de `milo.local` partait scopée sur la mauvaise interface
+    /// — `getaddrinfo start -- ifindex: 12`, jamais de réponse, contre 2 à 33 ms
+    /// pour `ifindex: 0` — celle-ci consommait le budget entier et le `POST` ne
+    /// partait jamais. Play échouait, Pause passait, sans rien qui les
+    /// distingue : une course, perdue une fois sur deux.
+    ///
+    /// L'appelant connaît déjà la source — les attributs de session la portent
+    /// dans `currentTrack.id`, sous la forme `<source>:<titre>`. On ne relit ici
+    /// que lorsqu'il n'en a aucune à donner.
     private static func activeSource() async -> String? {
-        guard let data = try? await get(path: "/api/audio/state"),
+        guard let data = try? await get(path: "/api/audio/state", timeout: sourceReadTimeout),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
         return json["active_source"] as? String
     }
 
+    /// Délai d'une requête partie d'un rappel de commande.
+    ///
+    /// Sous les trois secondes que le système accorde, pour qu'un échec soit
+    /// *consigné* avant que le processus ne meure plutôt que de disparaître
+    /// avec lui. Ce n'est pas une marge de confort : c'est la différence entre
+    /// une trace et un silence.
+    static let commandTimeout: TimeInterval = 2.5
+
+    /// Ce qu'on accorde à la relecture de la source, quand l'appelant n'en
+    /// connaît aucune.
+    ///
+    /// Elle précède le POST au lieu de le remplacer : les deux délais
+    /// s'additionnent, et deux fois `commandTimeout` faisait cinq secondes dans
+    /// un budget de trois — le repli ne pouvait pas aboutir précisément dans le
+    /// cas pour lequel il existe. Ce qu'on retire ici est retiré du POST qui
+    /// suit, de sorte que la somme reste sous `commandTimeout`.
+    static let sourceReadTimeout: TimeInterval = 1
+
     /// Envoie une commande de transport. Sans effet si aucune source n'est active.
     ///
+    /// `source` est celle que l'appelant connaît déjà ; `nil` déclenche la
+    /// relecture, qui coûte un aller-retour et le budget qui va avec.
+    ///
     /// Une unité qui ne connaît pas encore `next`/`prev` en radio répond HTTP
-    /// 400 : un refus propre, que ce chemin ignore comme tous les autres codes.
-    /// Le bouton ne fait alors rien, exactement comme avant que la commande
-    /// existe.
-    static func fireTransport(_ command: TransportCommand) async {
-        guard let source = await activeSource(),
-              let name = command.name(forSource: source)
-        else { return }
+    /// 400 : un refus propre. Il est désormais consigné — un bouton qui ne fait
+    /// rien ne disait pas s'il avait été refusé, s'il avait expiré, ou s'il
+    /// n'était jamais parti, et ce sont trois corrections différentes.
+    static func fireTransport(_ command: TransportCommand, source: String? = nil) async {
+        // `??` prend son côté droit en autoclosure, qui ne peut rien attendre :
+        // la relecture s'écrit donc en clair.
+        var resolved = source
+        var budget = commandTimeout
+        if resolved == nil {
+            resolved = await activeSource()
+            budget -= sourceReadTimeout
+        }
+        guard let source = resolved else {
+            noteCommand("\(command) : aucune source active")
+            return
+        }
+        guard let name = command.name(forSource: source) else {
+            noteCommand("\(command) : sans équivalent en \(source)")
+            return
+        }
         let body = try? JSONSerialization.data(withJSONObject: ["command": name])
-        _ = try? await post(path: "/api/audio/control/\(source)", body: body)
+        await sendControl(source: source, body: body, label: name, timeout: budget)
     }
 
     /// Déplace la tête de lecture. Milō attend des millisecondes ; le système,
     /// lui, raisonne en secondes.
-    static func fireSeek(toSeconds position: TimeInterval) async {
-        guard let source = await activeSource(), source != "radio" else { return }
+    static func fireSeek(toSeconds position: TimeInterval, source: String? = nil) async {
+        var resolved = source
+        var budget = commandTimeout
+        if resolved == nil {
+            resolved = await activeSource()
+            budget -= sourceReadTimeout
+        }
+        guard let source = resolved, source != "radio" else { return }
         let body = try? JSONSerialization.data(withJSONObject: [
             "command": "seek",
             "data": ["position_ms": Int(position * 1000)]
         ])
-        _ = try? await post(path: "/api/audio/control/\(source)", body: body)
+        await sendControl(source: source, body: body, label: "seek", timeout: budget)
+    }
+
+    /// L'envoi lui-même, tracé à l'entrée comme à la sortie.
+    ///
+    /// Tracer seulement le succès ne prouve rien : c'est ce qui a fait conclure
+    /// deux fois « la fermeture n'est jamais appelée » alors qu'elle l'était et
+    /// mourait en route.
+    private static func sendControl(source: String, body: Data?, label: String,
+                                    timeout: TimeInterval = commandTimeout) async {
+        guard let url = URL(string: baseURL() + "/api/audio/control/\(source)") else {
+            noteCommand("\(label) → \(source) : URL inconstructible")
+            return
+        }
+        noteCommand("\(label) → \(source) : envoi")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = timeout
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        if let body {
+            request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+
+        // La requête est faite ici plutôt que par `post(path:)`, qui jette la
+        // réponse : un 400 — le refus qu'une unité oppose à une commande qu'elle
+        // ne connaît pas — y devenait indiscernable d'un succès, et c'est
+        // précisément la distinction pour laquelle cette trace existe. Même
+        // raison que dans `writeClientVolume`.
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let status = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                .flatMap { $0?["status"] as? String } ?? "?"
+            noteCommand("\(label) → \(source) : HTTP \(code) \(status)")
+        } catch {
+            noteCommand("\(label) → \(source) : réseau \((error as NSError).code)")
+        }
+    }
+
+    /// Clé dédiée aux commandes : le journal partagé est un tableau réécrit par
+    /// des écrivains concurrents, assez sollicité pour en chasser ce qu'on
+    /// cherche avant qu'on le lise.
+    private static func noteCommand(_ message: String) {
+        UserDefaults(suiteName: appGroupID)?.set(message, forKey: "milo_command_trace")
     }
 
     /// Applique un niveau de curseur à une enceinte.
@@ -215,6 +313,48 @@ private actor VolumeWriter {
     }
 }
 
+/// Quand chaque URL de pochette a échoué pour la dernière fois.
+///
+/// Un acteur, et non une table `nonisolated(unsafe)`. Celle-ci ne tenait que par
+/// un argument sur les appelants du moment — « ce qui sérialise les accès, c'est
+/// la boucle de sondage, qui n'est pas réentrante » — et cet argument a déjà
+/// changé deux fois dans la même journée : l'extension a appelé `cacheArtwork`
+/// depuis `update(_:)`, plusieurs fois par processus et dans des tâches
+/// détachées, puis ne l'a plus appelé du tout. Aujourd'hui seule la boucle de
+/// l'app y touche, et l'acteur est donc théoriquement de trop.
+///
+/// Il reste. Deux mutations concurrentes d'un `Dictionary` Swift ne donnent pas
+/// une valeur périmée, elles corrompent la mémoire : c'est une panne dont le
+/// coût ne se compare pas à celui d'un acteur, et une invariante de sûreté n'a
+/// pas à dépendre de la liste des appelants qui existent ce matin.
+private actor ArtworkQuarantine {
+    static let shared = ArtworkQuarantine()
+
+    private var failures: [String: Date] = [:]
+
+    /// Depuis combien de temps cette URL est écartée, si elle l'est encore.
+    func held(_ url: String) -> TimeInterval? {
+        guard let at = failures[url] else { return nil }
+        let since = Date().timeIntervalSince(at)
+        return since < MiloAPIClient.artworkRetryDelay ? since : nil
+    }
+
+    /// Retient l'échec, et oublie ceux que l'accalmie a déjà couverts : sans
+    /// cette purge, la table grossirait d'une entrée par URL morte pour toute
+    /// la vie du processus.
+    func hold(_ url: String) {
+        let now = Date()
+        failures = failures.filter {
+            now.timeIntervalSince($0.value) < MiloAPIClient.artworkRetryDelay
+        }
+        failures[url] = now
+    }
+
+    func release(_ url: String) {
+        failures[url] = nil
+    }
+}
+
 // MARK: - Pochettes en cache
 
 extension MiloAPIClient {
@@ -308,19 +448,16 @@ extension MiloAPIClient {
         // `favicon`, servi par Milō sur le LAN, qui réussit presque toujours.
         // Un créneau unique se serait donc fait effacer par chaque favicon, et
         // la piste suivante aurait repayé les six secondes en entier.
-        if let failedAt = artworkFailures[absolute] {
-            let since = Date().timeIntervalSince(failedAt)
-            if since < artworkRetryDelay {
-                note("en quarantaine depuis \(Int(since)) s : \(absolute)")
-                return false
-            }
+        if let since = await ArtworkQuarantine.shared.held(absolute) {
+            note("en quarantaine depuis \(Int(since)) s : \(absolute)")
+            return false
         }
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             guard code == 200, !data.isEmpty else {
-                noteArtworkFailure(absolute)
+                await ArtworkQuarantine.shared.hold(absolute)
                 note("HTTP \(code), \(data.count) o"); return false
             }
             // Un format qu'ImageIO ne sait pas décoder — un SVG, par exemple —
@@ -332,10 +469,10 @@ extension MiloAPIClient {
             try payload.write(to: file, options: .atomic)
             note("déposé \(payload.count) o dans \(file.path)"
                  + (payload.count == data.count && !isJPEG(payload) ? " (non converti)" : ""))
-            artworkFailures[absolute] = nil
+            await ArtworkQuarantine.shared.release(absolute)
             return true
         } catch {
-            noteArtworkFailure(absolute)
+            await ArtworkQuarantine.shared.hold(absolute)
             note("échec \(url.lastPathComponent) : \(error.localizedDescription)")
             return false
         }
@@ -344,28 +481,7 @@ extension MiloAPIClient {
     /// Ce qu'on accorde au CDN des pochettes avant de rendre la main au
     /// sondage, et le répit qu'on s'accorde après un échec.
     private static let artworkTimeout: TimeInterval = 6
-    private static let artworkRetryDelay: TimeInterval = 30
-
-    /// Quand chaque URL de pochette a échoué pour la dernière fois.
-    ///
-    /// `cacheArtwork(from:)` est `async` et non isolée : l'appeler depuis
-    /// `MiloNowPlayingBridge`, qui est pourtant `@MainActor`, ne la fait pas
-    /// tourner sur cet acteur. Ce qui sérialise les accès n'est donc pas
-    /// l'isolation mais la boucle de sondage, qui n'est pas réentrante — voir
-    /// `startPump()`. D'où `nonisolated(unsafe)`, comme `prefersHostname` et
-    /// le `probed` de l'extension.
-    nonisolated(unsafe) private static var artworkFailures: [String: Date] = [:]
-
-    /// Retient l'échec, et oublie ceux que l'accalmie a déjà couverts : sans
-    /// cette purge, la table grossirait d'une entrée par URL morte pour toute
-    /// la vie du processus.
-    private static func noteArtworkFailure(_ url: String) {
-        let now = Date()
-        artworkFailures = artworkFailures.filter {
-            now.timeIntervalSince($0.value) < artworkRetryDelay
-        }
-        artworkFailures[url] = now
-    }
+    fileprivate static let artworkRetryDelay: TimeInterval = 30
 
     private static let artworkCacheGenerationKey = "milo_artwork_cache_generation"
 

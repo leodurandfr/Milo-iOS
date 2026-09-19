@@ -20,6 +20,12 @@ enum MiloPushToStart {
     /// sont — l'appel vient de `didFinishLaunching`, déjà sur cet acteur.
     @MainActor
     static func begin() {
+        // Réarme l'enregistrement du token de session. L'extension ne le dépose
+        // qu'une fois par couple (session, token), et cette garde-là vit dans le
+        // conteneur partagé — donc plus longtemps que le registre d'en face.
+        UserDefaults(suiteName: MiloAPIClient.appGroupID)?
+            .removeObject(forKey: MiloAPIClient.sessionTokenStampKey)
+
         if let token = RemoteMediaSession<MiloSessionAttributes>.pushToStartToken {
             Task { _ = await MiloAPIClient.registerPushToken(token, kind: .pushToStart) }
         }
