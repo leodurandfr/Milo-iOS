@@ -13,6 +13,12 @@ struct MiloTimelineProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<MiloWidgetEntry>) -> Void) {
         Task {
+            // Rattrapage : si l'enregistrement du token a échoué au moment où
+            // WidgetKit l'a émis, c'est ici qu'on repose la question.
+            if #available(iOS 26.0, *) {
+                await MiloAPIClient.reconcileWidgetPushToken()
+            }
+
             let data = await fetchMiloData()
             let recentInteraction = hasRecentInteraction()
 

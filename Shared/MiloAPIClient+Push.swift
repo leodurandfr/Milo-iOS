@@ -1,4 +1,5 @@
 import Foundation
+import WidgetKit
 
 /// Enregistrement des tokens APNs auprès de Milō.
 ///
@@ -8,6 +9,7 @@ import Foundation
 extension MiloAPIClient {
 
     static let deviceIDKey = "milo_push_device_id"
+    static let registeredWidgetTokenKey = "milo_registered_widget_token"
 
     /// Nature du token, telle que Milō la range dans son registre.
     ///
@@ -133,5 +135,30 @@ extension MiloAPIClient {
         guard let (_, response) = try? await URLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse else { return false }
         return http.statusCode == 200 || http.statusCode == 404
+    }
+
+    /// Rattrape un enregistrement de token qui n'a pas abouti.
+    ///
+    /// `pushTokenDidChange` n'est appelé que lorsque le token *change*. Si Milō
+    /// était injoignable à ce moment-là — redémarrage, Wi-Fi absent, backend plus
+    /// ancien que la route — l'enregistrement est perdu pour de bon : rien ne
+    /// rappellera le handler tant que le token reste le même, et le widget
+    /// resterait muet indéfiniment.
+    ///
+    /// La timeline, elle, repasse régulièrement. On s'en sert pour reposer la
+    /// question à Milō tant qu'il n'a pas confirmé. L'appel est ignoré dès que le
+    /// token courant est celui qu'on a déjà fait accepter, donc le cas normal ne
+    /// coûte aucune requête.
+    @available(iOS 26.0, *)
+    static func reconcileWidgetPushToken() async {
+        guard let info = await WidgetCenter.shared.currentPushInfo else { return }
+        let hex = info.token.map { String(format: "%02x", $0) }.joined()
+
+        let defaults = UserDefaults(suiteName: appGroupID)
+        guard defaults?.string(forKey: registeredWidgetTokenKey) != hex else { return }
+
+        if await registerPushToken(info.token, kind: .widget) {
+            defaults?.set(hex, forKey: registeredWidgetTokenKey)
+        }
     }
 }
