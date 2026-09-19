@@ -184,6 +184,62 @@ extension MiloAPIClient {
             .set("\(sessionID)/\(hex)", forKey: pendingSessionTokenKey)
     }
 
+    /// Ce que l'app tient vraiment, dit à Milō pour qu'il puisse lâcher le reste.
+    ///
+    /// Un token de session survit à sa session, et **rien du côté de Milō ne
+    /// peut voir la différence** : APNs accepte, répond 200, et le téléphone
+    /// jette la charge utile en silence faute de session derrière. Mesuré le
+    /// 19/09/2026 — `Code=35 "Could not find the specified now playing client"`
+    /// sur le téléphone à 18:35:23, et `session 2eb3b71b adopted (was None)`
+    /// chez Milō à 18:39:39, sur la même session. Milō a continué de la nourrir
+    /// indéfiniment sans jamais rouvrir : `_start_session` n'est pas atteint
+    /// tant qu'un token existe.
+    ///
+    /// L'app est la seule à savoir, et elle sait : `reconcileSession` énumère
+    /// les sessions vivantes à chaque passe. Une liste vide est une information
+    /// — c'est même celle qui compte le plus, puisqu'elle retire un fantôme.
+    /// Ce qui ne dit rien, c'est une app qui ne tourne pas ; et une app qui ne
+    /// tourne pas n'appelle pas ceci.
+    ///
+    /// N'est postée que lorsqu'elle change : à deux secondes de cadence, la
+    /// répéter serait une requête par passe pour ne rien apprendre. La dernière
+    /// envoyée est retenue en mémoire et non dans le conteneur partagé — au
+    /// prochain lancement, redire une fois ce que Milō sait déjà est le bon
+    /// prix pour ne jamais rester sur un état qu'on croit avoir transmis.
+    private nonisolated(unsafe) static var lastReportedSessions: String?
+
+    static func reportLiveSessions(_ sessionIDs: [String]) async {
+        let signature = sessionIDs.sorted().joined(separator: ",")
+        guard signature != lastReportedSessions else { return }
+
+        let body: [String: Any] = ["device_id": deviceID(), "session_ids": sessionIDs]
+        guard let url = URL(string: baseURL() + "/api/push/sessions"),
+              let payload = try? JSONSerialization.data(withJSONObject: body)
+        else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 3
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = payload
+
+        // Le code HTTP est lu, et `MiloAPIClient.post` ne le lit pas : il rend
+        // le corps quel que soit le statut. Un Milō antérieur à cette route
+        // répond 404, et s'en contenter armerait la garde ci-dessous — le
+        // rapport se tairait alors jusqu'au prochain changement de session,
+        // c'est-à-dire, pour un fantôme, jamais. C'est le même piège que celui
+        // consigné au-dessus de `registerPushToken`, et il se referme de la
+        // même façon.
+        guard let (_, response) = try? await lan.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200
+        else { return }
+
+        // Retenu seulement après coup : une panne réseau doit pouvoir être
+        // rejouée.
+        lastReportedSessions = signature
+    }
+
     /// Poste ce que l'extension a déposé. Appelé par l'app, à chaque passe.
     ///
     /// N'efface qu'en cas de succès : un refus de forme comme une panne réseau
@@ -300,7 +356,7 @@ extension MiloAPIClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = payload
 
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await lan.data(for: request),
               let http = response as? HTTPURLResponse
         else { return .unavailable }
 
@@ -378,7 +434,7 @@ extension MiloAPIClient {
         request.httpMethod = "DELETE"
         request.timeoutInterval = 3
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        guard let (_, response) = try? await URLSession.shared.data(for: request),
+        guard let (_, response) = try? await lan.data(for: request),
               let http = response as? HTTPURLResponse else { return false }
         return http.statusCode == 200 || http.statusCode == 404
     }

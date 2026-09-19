@@ -240,6 +240,19 @@ enum MiloNowPlayingBridge {
     /// lecture reprend.
     private static func reconcileSession() async {
         let all = (try? await RemoteMediaSession<MiloSessionAttributes>.sessions()) ?? []
+
+        // Dit à Milō ce que le téléphone tient réellement, **avant** de filtrer.
+        //
+        // Une session que l'app a lâchée reste vivante côté système ; ce qu'on
+        // rapporte ici est l'état de l'appareil, pas la prise de l'app. Filtrer
+        // d'abord ferait retirer chez Milō une session bien présente, et la
+        // rouvrirait pour rien.
+        //
+        // C'est la moitié manquante du problème des sessions fantômes : sans ce
+        // rapport, un token de session survit à sa session et Milō pousse dans
+        // le vide pour toujours. Voir `MiloAPIClient.reportLiveSessions`.
+        await MiloAPIClient.reportLiveSessions(all.map(\.id))
+
         let existing = all.filter { !disowned.contains($0.id) }
 
         guard let live = existing.first(where: { $0.isSystemPrimary }) ?? existing.first else {

@@ -16,6 +16,35 @@ import OSLog
 /// puis `log show x.logarchive --predicate 'subsystem == "leodurand.Milo-iOS"'`.
 let miloLog = Logger(subsystem: "leodurand.Milo-iOS", category: "artwork")
 
+/// Empreinte du binaire **effectivement chargé**, et non de celui qu'on vient de
+/// construire.
+///
+/// Réinstaller par-dessus ne remplace pas une extension que le système tient
+/// déjà : on lit alors un code et on en mesure un autre, ce qui a fait conclure
+/// deux fois qu'un correctif « ne marchait pas » alors qu'il ne s'exécutait
+/// jamais. Le 19/09/2026 le bundle construit à 17:35 tournait encore après le
+/// commit de 18:26 — sans repère dans le journal, rien ne le disait.
+///
+/// `dladdr` sur une adresse de ce fichier rend le chemin de l'image qui contient
+/// vraiment ce code : en Debug c'est le `.debug.dylib`, pas l'exécutable du
+/// bundle, distinction qui a déjà fait lire « build périmé » à tort. Sa date de
+/// modification change à chaque compilation et à chaque signature, si bien que
+/// l'empreinte s'actualise seule — rien à éditer avant chaque mesure, donc rien
+/// à oublier d'éditer.
+func miloBinaryStamp() -> String {
+    var info = Dl_info()
+    let here = unsafeBitCast(miloBinaryStamp as @convention(thin) () -> String,
+                             to: UnsafeRawPointer.self)
+    guard dladdr(here, &info) != 0, let raw = info.dli_fname else { return "image inconnue" }
+    let path = String(cString: raw)
+    let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+    let date = (attrs?[.modificationDate] as? Date).map {
+        $0.formatted(date: .abbreviated, time: .standard)
+    } ?? "date inconnue"
+    let size = (attrs?[.size] as? Int).map(String.init) ?? "?"
+    return "\((path as NSString).lastPathComponent) \(date) \(size)o"
+}
+
 /// Milō vu par l'écran verrouillé, le Centre de contrôle et la Dynamic Island.
 ///
 /// Le système garde cette instance et lui route les mises à jour suivantes : la
@@ -37,6 +66,7 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         self.attributes = attributes
         miloLog.info("SESSION CONSTRUITE \(attributes.id, privacy: .public) — instance \(ObjectIdentifier(self).debugDescription, privacy: .public)")
         Self.trace("session construite \(attributes.id)")
+
         startObservingPushToken()
     }
 
@@ -50,6 +80,7 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         self.attributes = attributes
         miloLog.info("update reçu \(attributes.id, privacy: .public)")
         Self.trace("update reçu")
+
         registerPushTokenIfNeeded(occasion: "update")
     }
 
@@ -147,8 +178,21 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             // ne décrivait pas une limite de taille mais ce même budget : la
             // grande image perdait la course que la petite gagnait.
             if let file = MiloAPIClient.artworkCacheFile(for: raw),
-               let data = try? Data(contentsOf: file), !data.isEmpty {
-                miloLog.info("cache servi brut : \(data.count, privacy: .public) o")
+               let data = try? Data(contentsOf: file), !data.isEmpty,
+               // Un fichier qui ne s'affichera pas ne vaut pas mieux qu'un
+               // fichier absent : on repasse par le réseau plutôt que de servir
+               // à coup sûr du vide. Ce qui a mis quatre WebP de station dans ce
+               // dossier est réparé juste en dessous, mais ceux déjà déposés y
+               // sont, et cette garde est ce qui les rattrape.
+               //
+               // Le verdict est celui de l'app, pas un second : deux définitions
+               // de « affichable » rendraient ce dossier incohérent, l'un
+               // écrivant ce que l'autre rejette.
+               MiloAPIClient.isDisplayableArtwork(data) {
+                miloLog.info("""
+                    cache servi brut : \(data.count, privacy: .public) o \
+                    format \(Self.formatTag(data), privacy: .public)
+                    """)
                 UserDefaults(suiteName: MiloAPIClient.appGroupID)?
                     .set("cache brut \(data.count)o", forKey: "milo_artwork_trace")
                 return try ArtworkRepresentation(data: data)
@@ -168,10 +212,21 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             // jeter sans qu'on s'en aperçoive : l'erreur remonte au système,
             // qui l'avale, et rien n'était écrit — un échec y était alors
             // indiscernable d'un fournisseur jamais appelé.
+            // `Accept` explicite plutôt que celui d'`URLSession`.
+            //
+            // Milō sert ses images de station en WebP et négocie désormais le
+            // format — mais faire reposer l'affichage sur ce qu'`URLSession`
+            // met par défaut dans cet en-tête, c'est parier sur une valeur
+            // qu'on n'a pas mesurée et qu'Apple peut changer. Le dire est
+            // gratuit, et c'est exactement à ça que sert cet en-tête : ce
+            // processus ne sait afficher que du JPEG.
+            var request = URLRequest(url: url)
+            request.setValue("image/jpeg", forHTTPHeaderField: "Accept")
+
             let data: Data
             let response: URLResponse
             do {
-                (data, response) = try await URLSession.shared.data(from: url)
+                (data, response) = try await URLSession.shared.data(for: request)
             } catch {
                 miloLog.error("""
                     réseau : échec \(url.lastPathComponent, privacy: .public) — \
@@ -181,7 +236,12 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                 throw error
             }
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            miloLog.info("réseau servi : HTTP \(code, privacy: .public), \(data.count, privacy: .public) o")
+            miloLog.info("""
+                réseau servi : HTTP \(code, privacy: .public), \
+                \(data.count, privacy: .public) o \
+                format \(Self.formatTag(data), privacy: .public) \
+                depuis \(url.absoluteString, privacy: .public)
+                """)
             UserDefaults(suiteName: MiloAPIClient.appGroupID)?
                 .set("réseau HTTP \(code) \(data.count)o", forKey: "milo_artwork_trace")
 
@@ -200,6 +260,48 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             // `.atomic` : sans lui, un processus tué en cours d'écriture
             // laisserait un fichier tronqué que la branche du dessus lirait
             // comme valide — non vide — et servirait indéfiniment.
+            // Ne déposer que ce qui s'affichera, et ne pas faire passer le
+            // reste pour une réussite.
+            //
+            // Mesuré le 19/09/2026 à 19:14:55, une station changée pendant que
+            // l'app dormait : `réseau servi : HTTP 200, 5526 o format WEBP
+            // depuis http://milo.local/api/radio/images/6239161eaee1.webp`.
+            // `ArtworkRepresentation(data:)` a pris ces octets sans broncher et
+            // le système n'a rien affiché — il n'affiche pas le WebP. Pire, ils
+            // étaient écrits dans le cache : `cacheArtwork` voyait un fichier
+            // non vide, sortait aussitôt, et la conversion en JPEG que l'app
+            // aurait faite n'avait plus jamais lieu. La station perdait son
+            // image définitivement.
+            //
+            // Milō sert désormais du JPEG à qui n'annonce pas comprendre le
+            // WebP, donc cette branche ne devrait plus être atteinte. Elle reste
+            // parce qu'un garde-fou qu'on retire le jour où il ne sert plus est
+            // un garde-fou qu'on n'avait pas.
+            //
+            // Elle ne refuse que ce qui a été *mesuré* comme inaffichable. Un
+            // PNG passe : rien ne l'a jamais incriminé, et le refuser priverait
+            // d'image une pochette parfaitement valide.
+            guard MiloAPIClient.isDisplayableArtwork(data) else {
+                miloLog.error("""
+                    réseau : octets inaffichables, rien mis en cache — \
+                    format \(Self.formatTag(data), privacy: .public) \
+                    depuis \(url.absoluteString, privacy: .public)
+                    """)
+                UserDefaults(suiteName: MiloAPIClient.appGroupID)?
+                    .set("inaffichable \(Self.formatTag(data))", forKey: "milo_artwork_trace")
+                // Jeter plutôt que rendre ces octets : le système retiendrait
+                // sinon une image vide sous cet identifiant et ne redemanderait
+                // plus rien — `Artwork` est `Identifiable` et c'est bien son
+                // `id` que le système retient. Un échec annoncé lui laisse la
+                // possibilité de redemander.
+                //
+                // L'erreur du framework plutôt qu'une des nôtres : c'est le mot
+                // que ce rappel est censé rendre quand il n'a pas d'image, et
+                // le seul que le système puisse interpréter autrement que comme
+                // une panne quelconque.
+                throw ArtworkRepresentation.ArtworkRepresentationError.noRepresentationAvailable
+            }
+
             if code == 200, !data.isEmpty,
                let file = MiloAPIClient.artworkCacheFile(for: raw) {
                 try? data.write(to: file, options: .atomic)
@@ -249,12 +351,31 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                 await MiloAPIClient.fireTransport(.play, source: source)
             },
             .pause { await MiloAPIClient.fireTransport(.pause, source: source) },
-            .togglePlayPause { await MiloAPIClient.fireTransport(.playPause, source: source) },
+
+            // `enabled(_:)` dit au système ce que ces deux-là ne peuvent pas
+            // faire, au lieu de le lui laisser découvrir en appelant un rappel
+            // qui sort aussitôt.
+            //
+            // Une commande désactivée reste affichée — c'est le contrat de la
+            // documentation — mais son rappel n'est pas invoqué. Ça ne change
+            // donc rien à ce qu'on voit, et ça évite un aller-retour qui
+            // n'aboutirait nulle part : sur un rappel à qui le système accorde
+            // trois secondes, ne pas être appelé vaut mieux que l'être pour
+            // rien.
+            //
+            // `playpause` n'a pas d'équivalent en radio — `name(forSource:)`
+            // rend `nil` — et un flux n'a pas de tête de lecture à déplacer :
+            // `fireSeek` sortait déjà sans rien envoyer. Source inconnue, les
+            // deux restent actives : c'est `nil`, pas « radio », et le repli
+            // saura relire ce qu'il faut.
+            .togglePlayPause { await MiloAPIClient.fireTransport(.playPause, source: source) }
+                .enabled(source != "radio"),
             .next { await MiloAPIClient.fireTransport(.next, source: source) },
             .previous { await MiloAPIClient.fireTransport(.previous, source: source) },
             .seekToPosition { position in
                 await MiloAPIClient.fireSeek(toSeconds: position, source: source)
             }
+                .enabled((attributes.currentTrack?.duration ?? 0) > 0)
         ]
     }
 
@@ -361,6 +482,26 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                 ]
             )
         }
+    }
+
+    /// Ce que sont vraiment les octets qu'on s'apprête à rendre.
+    ///
+    /// Le format et la taille ont déjà été confondus une fois sur ce chemin — le
+    /// WebP arrivait en 1024 et le JPEG en 600, et « la grande ne s'affiche
+    /// pas » se lisait comme une limite de taille. Le consommateur de
+    /// `ArtworkRepresentation(data:)` n'affiche pas le WebP : il l'accepte, ne
+    /// jette rien, et ne montre rien. Sans ce mot dans le journal, cette panne-là
+    /// est indiscernable d'une pochette qui n'est jamais arrivée.
+    nonisolated static func formatTag(_ data: Data) -> String {
+        let b = [UInt8](data.prefix(12))
+        guard b.count >= 12 else { return "trop court" }
+        if b[0] == 0xFF, b[1] == 0xD8 { return "JPEG" }
+        if b[0] == 0x89, b[1] == 0x50, b[2] == 0x4E, b[3] == 0x47 { return "PNG" }
+        if b[0] == 0x52, b[1] == 0x49, b[2] == 0x46, b[3] == 0x46,
+           b[8] == 0x57, b[9] == 0x45, b[10] == 0x42, b[11] == 0x50 { return "WEBP" }
+        if b[0] == 0x47, b[1] == 0x49, b[2] == 0x46 { return "GIF" }
+        if b[0] == 0x3C { return "texte/SVG" }
+        return "inconnu " + b.prefix(4).map { String(format: "%02x", $0) }.joined()
     }
 
     /// Journal de l'extension, lisible depuis le Mac par le conteneur partagé.

@@ -63,6 +63,56 @@ struct MiloAPIClient {
     /// s'il traîne.
     nonisolated(unsafe) static var prefersHostname = false
 
+    /// La connexion à Milō, établie une fois et réutilisée.
+    ///
+    /// C'est ce que la documentation d'Apple demande explicitement pour une
+    /// extension Now Playing : « The framework caches the sessions your
+    /// extension returns and routes subsequent updates and commands to the same
+    /// instance. **If your extension connects to a backend or device, establish
+    /// that connection once and reuse it across `session(_:)` calls.** »
+    ///
+    /// Pourquoi ça compte ici, mesuré le 19/09/2026 : une commande qui ouvrait
+    /// sa propre connexion rejouait la résolution de `milo.local` **et** le
+    /// tirage NECP à chaque appui, et perdait de temps en temps. À 19:39:21 le
+    /// nom se résout en 1 ms, puis pas un seul chemin ne devient utilisable —
+    /// douze `failed resolver`, cent quatorze `waiting`, **zéro `ready`** — et
+    /// la commande expire en −1001. À 19:40:35, même processus, cinq candidats
+    /// refusés puis un qui passe, et le `POST` aboutit. La différence n'est pas
+    /// dans le code : c'est la course, rejouée à chaque fois.
+    ///
+    /// Une connexion déjà établie ne la rejoue pas — mais seulement tant que le
+    /// processus vit, et `mediaremoted` termine celui-ci sans arrêt : trois
+    /// `RBSTerminateRequest` et trois PID distincts en quinze secondes, mesurés
+    /// à 19:57. Le conseil d'Apple suppose un processus qui dure ; ici la
+    /// réutilisation ne porte qu'à l'intérieur d'un même réveil, ce qui couvre
+    /// le cas où plusieurs commandes se suivent. Au-delà, c'est le second essai
+    /// de `sendControl` qui rattrape.
+    ///
+    /// Un préchauffage explicite a été essayé et retiré : il partait bien
+    /// (`milo_warm_trace` = « lancé ») et n'aboutissait jamais — pas un seul
+    /// `HEAD /` de l'extension dans le journal de nginx en vingt minutes. Une
+    /// tâche détachée ne survit pas au processus qui l'a lancée, et une
+    /// connexion TCP encore moins.
+    /// Deux chemins restent délibérément sur `URLSession.shared` :
+    ///
+    /// - **les pochettes**, qui pèsent des centaines de kilooctets et partent le
+    ///   plus souvent vers Internet. Les laisser ici, c'est mettre une commande
+    ///   derrière un téléchargement d'un demi-mégaoctet ;
+    /// - **la sonde** de `MiloRemoteSession`, dont tout l'objet est de mesurer
+    ///   ce qu'une connexion neuve obtient. Sur un pool réutilisé elle mesurerait
+    ///   le pool.
+    nonisolated(unsafe) static let lan: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        // Ne pas attendre un réseau qui n'est pas là : dans une extension, un
+        // rappel qui patiente est un rappel que le système tue.
+        configuration.waitsForConnectivity = false
+        // Deux, pas une : la sonde ou un maintien en vie ne doit pas faire la
+        // queue devant une commande que l'utilisateur vient de déclencher.
+        configuration.httpMaximumConnectionsPerHost = 2
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
+
     static func baseURL() -> String {
         if prefersHostname { return "http://milo.local" }
         if let sharedDefaults = UserDefaults(suiteName: appGroupID),
@@ -100,7 +150,7 @@ struct MiloAPIClient {
         guard let body = try? JSONSerialization.data(withJSONObject: bodyDict) else { return }
         request.httpBody = body
         let requestTime = Date().timeIntervalSince1970
-        URLSession.shared.dataTask(with: request) { data, _, _ in
+        lan.dataTask(with: request) { data, _, _ in
             guard let data = data,
                   let response = try? JSONDecoder().decode(VolumeResponse.self, from: data),
                   response.status == "success",
@@ -204,7 +254,7 @@ struct MiloAPIClient {
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, _) = try await lan.data(for: request)
         return data
     }
 
@@ -219,7 +269,7 @@ struct MiloAPIClient {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, _) = try await lan.data(for: request)
         return data
     }
 

@@ -12,6 +12,12 @@ import NowPlaying
 struct MiloNowPlayingExtension: RemoteMediaSessionExtension {
 
     init() {
+        // Première chose écrite par le processus, avant toute autre : c'est le
+        // seul point qui prouve *quel* binaire le système vient de charger.
+        // Tracer à l'entrée, jamais à la sortie — un chemin qui échoue en
+        // silence se lit sinon comme un chemin jamais pris.
+        miloLog.info("EXTENSION DÉMARRÉE — binaire \(miloBinaryStamp(), privacy: .public)")
+
         // Cette extension n'atteint pas Milō par son IP — voir
         // `MiloAPIClient.prefersHostname`, où la mesure est consignée.
         MiloAPIClient.prefersHostname = true

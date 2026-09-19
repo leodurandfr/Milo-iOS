@@ -36,6 +36,20 @@ extension MiloAPIClient {
             case .previous: return "prev"
             }
         }
+
+        /// Rejouer cette commande donne-t-il le même résultat que la jouer une
+        /// fois ?
+        ///
+        /// La question se pose parce qu'un délai dépassé ne dit pas que Milō n'a
+        /// rien fait : la requête a pu aboutir et seule la réponse se perdre. Un
+        /// `resume_playback` rejoué laisse la lecture en cours ; un `next`
+        /// rejoué saute deux stations, et l'utilisateur n'a appuyé qu'une fois.
+        var isIdempotent: Bool {
+            switch self {
+            case .play, .pause: return true
+            case .playPause, .next, .previous: return false
+            }
+        }
     }
 
     /// Source active du moment, telle que `/api/audio/state` la nomme.
@@ -109,7 +123,8 @@ extension MiloAPIClient {
             return
         }
         let body = try? JSONSerialization.data(withJSONObject: ["command": name])
-        await sendControl(source: source, body: body, label: name, timeout: budget)
+        await sendControl(source: source, body: body, label: name, timeout: budget,
+                          retryable: command.isIdempotent)
     }
 
     /// Déplace la tête de lecture. Milō attend des millisecondes ; le système,
@@ -126,7 +141,9 @@ extension MiloAPIClient {
             "command": "seek",
             "data": ["position_ms": Int(position * 1000)]
         ])
-        await sendControl(source: source, body: body, label: "seek", timeout: budget)
+        // Un `seek` porte une position absolue : le rejouer vise le même point.
+        await sendControl(source: source, body: body, label: "seek", timeout: budget,
+                          retryable: true)
     }
 
     /// L'envoi lui-même, tracé à l'entrée comme à la sortie.
@@ -135,7 +152,8 @@ extension MiloAPIClient {
     /// deux fois « la fermeture n'est jamais appelée » alors qu'elle l'était et
     /// mourait en route.
     private static func sendControl(source: String, body: Data?, label: String,
-                                    timeout: TimeInterval = commandTimeout) async {
+                                    timeout: TimeInterval = commandTimeout,
+                                    retryable: Bool) async {
         guard let url = URL(string: baseURL() + "/api/audio/control/\(source)") else {
             noteCommand("\(label) → \(source) : URL inconstructible")
             return
@@ -156,14 +174,51 @@ extension MiloAPIClient {
         // ne connaît pas — y devenait indiscernable d'un succès, et c'est
         // précisément la distinction pour laquelle cette trace existe. Même
         // raison que dans `writeClientVolume`.
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            let status = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
-                .flatMap { $0?["status"] as? String } ?? "?"
-            noteCommand("\(label) → \(source) : HTTP \(code) \(status)")
-        } catch {
-            noteCommand("\(label) → \(source) : réseau \((error as NSError).code)")
+        // Deux essais courts plutôt qu'un long — quand c'est possible et licite.
+        //
+        // L'échec mesuré n'est pas un refus : c'est une connexion qui n'aboutit
+        // jamais et consomme tout le délai — zéro chemin `ready` à 19:39:21,
+        // puis un chemin qui passe à 19:40:35 sans rien changer d'autre. Un
+        // second tirage est donc exactement ce qui peut le sauver.
+        //
+        // Deux conditions, chacune pour une raison différente :
+        //
+        // - **`retryable`**, parce qu'un délai dépassé ne dit pas que Milō n'a
+        //   rien fait. La requête a pu aboutir et seule la réponse se perdre :
+        //   rejouer un `next` ferait alors sauter deux stations pour un seul
+        //   appui. Seules les commandes dont le résultat ne dépend pas du
+        //   nombre de fois qu'on les envoie sont rejouées.
+        // - **le budget**, parce que deux tentatives trop courtes échouent là
+        //   où une seule aboutissait. `fireTransport` retire déjà
+        //   `sourceReadTimeout` quand il a dû relire la source : couper en deux
+        //   ce qui reste donnerait 750 ms par essai. En dessous du seuil, on
+        //   garde une seule tentative longue.
+        //
+        // Un `HTTP 400` n'est jamais rejoué non plus : c'est le refus d'une
+        // source à une commande qu'elle ne connaît pas, et le répéter ne ferait
+        // que le répéter plus lentement.
+        let minimumPerAttempt: TimeInterval = 1.1
+        let attempts = (retryable && timeout >= 2 * minimumPerAttempt) ? 2 : 1
+        let each = timeout / Double(attempts)
+        for attempt in 1...attempts {
+            request.timeoutInterval = each
+            do {
+                let (data, response) = try await lan.data(for: request)
+                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                let status = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                    .flatMap { $0?["status"] as? String } ?? "?"
+                noteCommand("\(label) → \(source) : HTTP \(code) \(status)"
+                            + (attempt == 1 ? "" : " (2e essai)"))
+                return
+            } catch {
+                let code = (error as NSError).code
+                noteCommand("\(label) → \(source) : réseau \(code) (essai \(attempt)/\(attempts))")
+                if attempt == attempts { return }
+                // Rien d'autre à faire avant de retenter : la boucle rouvre une
+                // connexion, et c'est précisément le nouveau tirage qu'on veut.
+                // Une requête concurrente de plus ne ferait que se disputer un
+                // budget qui n'en a pas les moyens.
+            }
         }
     }
 
@@ -229,7 +284,7 @@ extension MiloAPIClient {
         // resté invisible.
         let defaults = UserDefaults(suiteName: appGroupID)
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (_, response) = try await lan.data(for: request)
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             if code == 200 {
                 defaults?.removeObject(forKey: "milo_volume_write_error")
@@ -360,11 +415,26 @@ private actor ArtworkQuarantine {
 extension MiloAPIClient {
 
     /// Dossier partagé où l'app dépose les pochettes pour l'extension.
+    ///
+    /// Sous `Library/Caches`, et pas à la racine du conteneur, pour une raison
+    /// d'outillage : `devicectl device copy from` refuse tout ce qui est hors de
+    /// `Library`, `Documents` et `tmp` — « Access restricted: … is outside the
+    /// allowed container directories ». Tant que ce dossier était à la racine,
+    /// le seul moyen de savoir ce qu'il contenait vraiment était de le déduire,
+    /// et c'est précisément la question qui compte ici : les octets déposés
+    /// sont-ils du JPEG affichable ou du WebP qui ne s'affichera pas. Sous
+    /// `Library`, on peut aller les lire et arrêter de déduire.
+    ///
+    /// `Caches` est aussi l'endroit juste au sens du système : ce qui est ici se
+    /// retélécharge, et iOS a le droit de le reprendre quand le disque se remplit.
     static func artworkCacheDirectory() -> URL? {
         guard let container = FileManager.default
             .containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
         else { return nil }
-        let dir = container.appendingPathComponent("artwork", isDirectory: true)
+        let dir = container
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Caches", isDirectory: true)
+            .appendingPathComponent("artwork", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -408,13 +478,21 @@ extension MiloAPIClient {
         guard let file = artworkCacheFile(for: urlString) else {
             note("pas de conteneur partagé"); return false
         }
-        // Présence et taille suffisent : le contenu est garanti affichable au
-        // moment où on l'écrit, pas relu ici. Cette fonction repasse toutes les
-        // deux secondes ; y relire chaque pochette pour en inspecter trois
-        // octets se paierait sans rien apprendre.
-        if let size = (try? FileManager.default
-            .attributesOfItem(atPath: file.path)[.size]) as? Int, size > 0 {
-            note("déjà en cache (\(size) o) \(file.path)")
+        // Le cache est jugé sur ses **octets d'en-tête**, pas sur sa taille.
+        //
+        // « Le contenu est garanti affichable au moment où on l'écrit » n'était
+        // vrai que de cette fonction-ci. L'extension écrit dans le même dossier,
+        // et son repli réseau y déposait les octets bruts sans les convertir :
+        // mesuré le 19/09/2026 au soir, quatre WebP de station (5 526, 10 416,
+        // 11 494 et 11 618 o) au milieu de vingt JPEG. Un contrôle de taille les
+        // déclarait valides, cette fonction sortait aussitôt, et la conversion
+        // n'avait plus jamais lieu — la station restait sans image pour de bon.
+        //
+        // Lire quatre octets coûte moins qu'un `attributesOfItem`, qui ouvrait
+        // déjà le fichier. La cadence de deux secondes n'est donc pas un
+        // argument contre, et elle ne l'était pas non plus.
+        if let head = artworkHead(of: file), isDisplayableArtwork(head) {
+            note("déjà en cache (\(isJPEG(head) ? "JPEG" : "PNG")) \(file.path)")
             return true
         }
 
@@ -434,6 +512,10 @@ extension MiloAPIClient {
         // était la seule à ne pas le faire.
         var request = URLRequest(url: url)
         request.timeoutInterval = artworkTimeout
+        // Ce qu'on sait afficher, dit plutôt que supposé. `jpegNormalized`
+        // rattraperait un WebP ici, mais le dire évite la conversion **et**
+        // aligne l'app sur l'extension, qui ne peut pas se le permettre.
+        request.setValue("image/jpeg", forHTTPHeaderField: "Accept")
 
         // Et une fois qu'elle a échoué, ne pas la redemander au tour suivant.
         // Rien n'est écrit en cas d'échec, donc la boucle revient ici deux
@@ -461,14 +543,27 @@ extension MiloAPIClient {
                 note("HTTP \(code), \(data.count) o"); return false
             }
             // Un format qu'ImageIO ne sait pas décoder — un SVG, par exemple —
-            // est déposé tel quel. Il ne s'affichera pas, mais rien ne le
-            // rendrait affichable, et **ne rien écrire rouvrirait la boucle** :
-            // le cache resterait vide, et cette fonction retéléchargerait la
-            // même image toutes les deux secondes, indéfiniment.
-            let payload = jpegNormalized(data) ?? data
+            // n'est **pas** déposé, et c'est la quarantaine qui empêche la
+            // boucle.
+            //
+            // Le déposer tel quel était le remède d'avant, quand la présence se
+            // jugeait sur la taille : un fichier non vide passait pour valide et
+            // la boucle s'arrêtait là. Depuis que les deux côtés jugent sur les
+            // octets d'en-tête, ce même dépôt rouvre la boucle par l'autre bout
+            // — le fichier est écrit, relu, refusé, retéléchargé, toutes les
+            // deux secondes. Et l'extension paierait un aller-retour réseau à
+            // chaque demande de pochette, dans le budget qu'elle n'a pas.
+            //
+            // `hold` donne trente secondes de répit à cette URL, ce qui borne
+            // les reprises sans rien écrire qu'il faudrait ensuite rejeter.
+            guard let payload = jpegNormalized(data) ?? (isDisplayableArtwork(data) ? data : nil)
+            else {
+                await ArtworkQuarantine.shared.hold(absolute)
+                note("format non affichable, rien déposé : \(url.lastPathComponent)")
+                return false
+            }
             try payload.write(to: file, options: .atomic)
-            note("déposé \(payload.count) o dans \(file.path)"
-                 + (payload.count == data.count && !isJPEG(payload) ? " (non converti)" : ""))
+            note("déposé \(payload.count) o dans \(file.path)")
             await ArtworkQuarantine.shared.release(absolute)
             return true
         } catch {
@@ -498,20 +593,74 @@ extension MiloAPIClient {
     /// effacé ici est retéléchargé à la demande.
     private static func purgeLegacyArtworkCacheOnce() {
         let defaults = UserDefaults(suiteName: appGroupID)
-        guard defaults?.integer(forKey: artworkCacheGenerationKey) != 1,
+        guard defaults?.integer(forKey: artworkCacheGenerationKey) != 3,
               let dir = artworkCacheDirectory()
         else { return }
 
         let files = (try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: nil)) ?? []
-        for file in files {
+
+        // Génération 3 : ne retirer que ce qui ne s'affichera pas, au lieu de
+        // tout vider. Les WebP déposés par l'extension sont la panne ; les JPEG
+        // à côté d'eux sont bons, et les rejeter coûterait un téléchargement par
+        // pochette pour rien.
+        //
+        // Les garde-fous du dessus rendent déjà ces fichiers inertes — un
+        // fichier non-JPEG est traité comme un cache manquant des deux côtés.
+        // Ce balayage est ce qui fait que « le cache ne contient que du JPEG »
+        // est vrai maintenant, et pas seulement à la prochaine lecture de
+        // chaque station. Une invariante qu'on peut aller vérifier vaut mieux
+        // qu'une qui s'établira peut-être.
+        for file in files where !isDisplayableArtwork(artworkHead(of: file) ?? Data()) {
             try? FileManager.default.removeItem(at: file)
         }
-        defaults?.set(1, forKey: artworkCacheGenerationKey)
+
+        // Le dossier a déménagé sous `Library/Caches` à la génération 2.
+        // L'ancien, à la racine du conteneur, ne sera plus jamais consulté — il
+        // part entier, sinon il resterait là pour toujours sans que rien ne le
+        // ramasse. Sans effet une fois qu'il n'existe plus.
+        if let container = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: appGroupID) {
+            try? FileManager.default.removeItem(
+                at: container.appendingPathComponent("artwork", isDirectory: true))
+        }
+        defaults?.set(3, forKey: artworkCacheGenerationKey)
+    }
+
+    /// Les premiers octets d'un fichier, sans le charger en entier.
+    ///
+    /// `Data(contentsOf:)` lirait le mégaoctet d'une pochette pour en regarder
+    /// quatre. Ici on ne lit que ce qu'on inspecte.
+    private static func artworkHead(of file: URL, count: Int = 8) -> Data? {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        return try? handle.read(upToCount: count)
+    }
+
+    /// Ces octets s'afficheront-ils une fois rendus au système ?
+    ///
+    /// **JPEG et PNG, pas seulement JPEG.** Ce qui a été mesuré le 19/09/2026,
+    /// c'est que le WebP arrive intact et n'affiche rien ; rien n'a jamais
+    /// incriminé le PNG, et les pochettes `mzstatic` en `.png` s'affichaient
+    /// très bien. Un verdict limité au JPEG refusait une image parfaitement
+    /// valide et la faisait retélécharger à chaque passe.
+    ///
+    /// Partagé avec l'extension : c'est le même verdict des deux côtés qui rend
+    /// le cache homogène. Deux définitions de « affichable » en donneraient deux
+    /// contenus, et c'est déjà arrivé.
+    static func isDisplayableArtwork(_ data: Data) -> Bool {
+        isJPEG(data) || isPNG(data)
+    }
+
+    /// Les huit octets de signature d'un PNG.
+    static func isPNG(_ data: Data) -> Bool {
+        let signature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        guard data.count >= signature.count else { return false }
+        return Array(data.prefix(signature.count)) == signature
     }
 
     /// Les trois octets d'en-tête d'un JFIF/Exif.
-    private static func isJPEG(_ data: Data) -> Bool {
+    static func isJPEG(_ data: Data) -> Bool {
         data.count > 3 && data[data.startIndex] == 0xFF
             && data[data.startIndex + 1] == 0xD8
             && data[data.startIndex + 2] == 0xFF

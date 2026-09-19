@@ -17,5 +17,27 @@
 		<key>EXExtensionPointIdentifier</key>
 		<string>com.apple.nowplaying.remote-media</string>
 	</dict>
+	<!-- Sans ça, un `Logger.info` de cette app n'est gardé qu'en mémoire vive et
+	     `log collect` le rate dès qu'on relève les journaux une minute trop tard :
+	     seules les erreurs survivent, et un chemin qui trace à l'entrée devient
+	     indiscernable d'un chemin jamais pris. Mesuré le 19/09/2026 — treize
+	     processus d'extension en quinze minutes, deux lignes relevées, toutes deux
+	     des erreurs. Persister au niveau debug rend la chronologie relisible. -->
+	<key>OSLogPreferences</key>
+	<dict>
+		<key>leodurand.Milo-iOS</key>
+		<dict>
+			<key>DEFAULT-OPTIONS</key>
+			<dict>
+				<key>Level</key>
+				<dict>
+					<key>Enable</key>
+					<string>Debug</string>
+					<key>Persist</key>
+					<string>Debug</string>
+				</dict>
+			</dict>
+		</dict>
+	</dict>
 </dict>
 </plist>
