@@ -7,18 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		C2A00F012E2A000F00677FAA /* MiloNowPlayingExtension.appex in Embed ExtensionKit Extensions */ = {isa = PBXBuildFile; fileRef = C2A001012E2A000100677FAA /* MiloNowPlayingExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C1F00F012E29000F00677FAA /* MiloWidgetExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = C1F001012E29000100677FAA /* MiloWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		C2A00F012E2A000F00677FAA /* MiloNowPlayingExtension.appex in Embed ExtensionKit Extensions */ = {isa = PBXBuildFile; fileRef = C2A001012E2A000100677FAA /* MiloNowPlayingExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		C2A00C012E2A000C00677FAA /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = B31D85172E1A632900677FAA /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = C2A005012E2A000500677FAA;
-			remoteInfo = MiloNowPlayingExtension;
-		};
 		B31D85362E1A632B00677FAA /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = B31D85172E1A632900677FAA /* Project object */;
@@ -40,20 +33,16 @@
 			remoteGlobalIDString = C1F005012E29000500677FAA;
 			remoteInfo = MiloWidgetExtension;
 		};
+		C2A00C012E2A000C00677FAA /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B31D85172E1A632900677FAA /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C2A005012E2A000500677FAA;
+			remoteInfo = MiloNowPlayingExtension;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		C2A010012E2A001000677FAA /* Embed ExtensionKit Extensions */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "$(EXTENSIONS_FOLDER_PATH)";
-			dstSubfolderSpec = 16;
-			files = (
-				C2A00F012E2A000F00677FAA /* MiloNowPlayingExtension.appex in Embed ExtensionKit Extensions */,
-			);
-			name = "Embed ExtensionKit Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		C1F00E012E29000E00677FAA /* Embed App Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -65,24 +54,28 @@
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C2A010012E2A001000677FAA /* Embed ExtensionKit Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(EXTENSIONS_FOLDER_PATH)";
+			dstSubfolderSpec = 16;
+			files = (
+				C2A00F012E2A000F00677FAA /* MiloNowPlayingExtension.appex in Embed ExtensionKit Extensions */,
+			);
+			name = "Embed ExtensionKit Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		C2A001012E2A000100677FAA /* MiloNowPlayingExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MiloNowPlayingExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		B31D851F2E1A632900677FAA /* Milo-iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Milo-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B31D85352E1A632B00677FAA /* Milo-iOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Milo-iOSTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B31D853F2E1A632B00677FAA /* Milo-iOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Milo-iOSUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C1F001012E29000100677FAA /* MiloWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MiloWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		C2A001012E2A000100677FAA /* MiloNowPlayingExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MiloNowPlayingExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		C2A004012E2A000400677FAA /* Exceptions for "MiloNowPlaying" folder in "MiloNowPlayingExtension" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = C2A005012E2A000500677FAA /* MiloNowPlayingExtension */;
-		};
 		B31D85602E1A632900677FAA /* Exceptions for "Milo-iOS" folder in "Milo-iOS" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -97,22 +90,16 @@
 			);
 			target = C1F005012E29000500677FAA /* MiloWidgetExtension */;
 		};
+		C2A004012E2A000400677FAA /* Exceptions for "MiloNowPlaying" folder in "MiloNowPlayingExtension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = C2A005012E2A000500677FAA /* MiloNowPlayingExtension */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		C2A002012E2A000200677FAA /* MiloNowPlaying */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				C2A004012E2A000400677FAA /* Exceptions for "MiloNowPlaying" folder in "MiloNowPlayingExtension" target */,
-			);
-			path = MiloNowPlaying;
-			sourceTree = "<group>";
-		};
-		C2A003012E2A000300677FAA /* NowPlaying */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = NowPlaying;
-			sourceTree = "<group>";
-		};
 		B31D85212E1A632900677FAA /* Milo-iOS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -144,16 +131,22 @@
 			path = Shared;
 			sourceTree = "<group>";
 		};
+		C2A002012E2A000200677FAA /* MiloNowPlaying */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				C2A004012E2A000400677FAA /* Exceptions for "MiloNowPlaying" folder in "MiloNowPlayingExtension" target */,
+			);
+			path = MiloNowPlaying;
+			sourceTree = "<group>";
+		};
+		C2A003012E2A000300677FAA /* NowPlaying */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = NowPlaying;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		C2A006012E2A000600677FAA /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		B31D851C2E1A632900677FAA /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -176,6 +169,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		C1F006012E29000600677FAA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C2A006012E2A000600677FAA /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -214,30 +214,6 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		C2A005012E2A000500677FAA /* MiloNowPlayingExtension */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = C2A00B012E2A000B00677FAA /* Build configuration list for PBXNativeTarget "MiloNowPlayingExtension" */;
-			buildPhases = (
-				C2A007012E2A000700677FAA /* Sources */,
-				C2A006012E2A000600677FAA /* Frameworks */,
-				C2A008012E2A000800677FAA /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				C2A002012E2A000200677FAA /* MiloNowPlaying */,
-				C2A003012E2A000300677FAA /* NowPlaying */,
-				C1F003012E29000300677FAA /* Shared */,
-			);
-			name = MiloNowPlayingExtension;
-			packageProductDependencies = (
-			);
-			productName = MiloNowPlayingExtension;
-			productReference = C2A001012E2A000100677FAA /* MiloNowPlayingExtension.appex */;
-			productType = "com.apple.product-type.extensionkit-extension";
-		};
 		B31D851E2E1A632900677FAA /* Milo-iOS */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = B31D85482E1A632B00677FAA /* Build configuration list for PBXNativeTarget "Milo-iOS" */;
@@ -335,6 +311,30 @@
 			productReference = C1F001012E29000100677FAA /* MiloWidgetExtension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		C2A005012E2A000500677FAA /* MiloNowPlayingExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C2A00B012E2A000B00677FAA /* Build configuration list for PBXNativeTarget "MiloNowPlayingExtension" */;
+			buildPhases = (
+				C2A007012E2A000700677FAA /* Sources */,
+				C2A006012E2A000600677FAA /* Frameworks */,
+				C2A008012E2A000800677FAA /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				C1F003012E29000300677FAA /* Shared */,
+				C2A002012E2A000200677FAA /* MiloNowPlaying */,
+				C2A003012E2A000300677FAA /* NowPlaying */,
+			);
+			name = MiloNowPlayingExtension;
+			packageProductDependencies = (
+			);
+			productName = MiloNowPlayingExtension;
+			productReference = C2A001012E2A000100677FAA /* MiloNowPlayingExtension.appex */;
+			productType = "com.apple.product-type.extensionkit-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -385,13 +385,6 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		C2A008012E2A000800677FAA /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		B31D851D2E1A632900677FAA /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -420,16 +413,16 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-/* End PBXResourcesBuildPhase section */
-
-/* Begin PBXSourcesBuildPhase section */
-		C2A007012E2A000700677FAA /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
+		C2A008012E2A000800677FAA /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
 		B31D851B2E1A632900677FAA /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -458,14 +451,16 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C2A007012E2A000700677FAA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		C2A00D012E2A000D00677FAA /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = C2A005012E2A000500677FAA /* MiloNowPlayingExtension */;
-			targetProxy = C2A00C012E2A000C00677FAA /* PBXContainerItemProxy */;
-		};
 		B31D85372E1A632B00677FAA /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = B31D851E2E1A632900677FAA /* Milo-iOS */;
@@ -481,63 +476,14 @@
 			target = C1F005012E29000500677FAA /* MiloWidgetExtension */;
 			targetProxy = C1F00C012E29000C00677FAA /* PBXContainerItemProxy */;
 		};
+		C2A00D012E2A000D00677FAA /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C2A005012E2A000500677FAA /* MiloNowPlayingExtension */;
+			targetProxy = C2A00C012E2A000C00677FAA /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		C2A009012E2A000900677FAA /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = MiloNowPlaying/MiloNowPlaying.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 7C2S8B9978;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = MiloNowPlaying/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = MiloNowPlaying;
-				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "leodurand.Milo-iOS.MiloNowPlaying";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
-			};
-			name = Debug;
-		};
-		C2A00A012E2A000A00677FAA /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = MiloNowPlaying/MiloNowPlaying.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 7C2S8B9978;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = MiloNowPlaying/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = MiloNowPlaying;
-				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "leodurand.Milo-iOS.MiloNowPlaying";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				SWIFT_COMPILATION_MODE = wholemodule;
-			};
-			name = Release;
-		};
 		B31D85492E1A632B00677FAA /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -853,18 +799,63 @@
 			};
 			name = Release;
 		};
+		C2A009012E2A000900677FAA /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = MiloNowPlaying/MiloNowPlaying.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7C2S8B9978;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MiloNowPlaying/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = MiloNowPlaying;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "leodurand.Milo-iOS.MiloNowPlaying";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C2A00A012E2A000A00677FAA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = MiloNowPlaying/MiloNowPlaying.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7C2S8B9978;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MiloNowPlaying/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = MiloNowPlaying;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "leodurand.Milo-iOS.MiloNowPlaying";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		C2A00B012E2A000B00677FAA /* Build configuration list for PBXNativeTarget "MiloNowPlayingExtension" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				C2A009012E2A000900677FAA /* Debug */,
-				C2A00A012E2A000A00677FAA /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
 		B31D851A2E1A632900677FAA /* Build configuration list for PBXProject "Milo-iOS" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -906,6 +897,15 @@
 			buildConfigurations = (
 				C1F009012E29000900677FAA /* Debug */,
 				C1F00A012E29000A00677FAA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C2A00B012E2A000B00677FAA /* Build configuration list for PBXNativeTarget "MiloNowPlayingExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C2A009012E2A000900677FAA /* Debug */,
+				C2A00A012E2A000A00677FAA /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

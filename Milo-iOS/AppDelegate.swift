@@ -36,6 +36,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // l'app ne tourne pas — c'est-à-dire presque toujours.
         if #available(iOS 27.0, *) {
             MiloPushToStart.begin()
+            // Chemin local : pendant que l'app tourne, la session n'a pas besoin
+            // d'APNs. Elle passe quand même par l'extension, que le système
+            // appelle pour la construire — c'est donc aussi le seul essai qui
+            // dise si cette extension est utilisable.
+            Task { await MiloNowPlayingBridge.refresh() }
         }
 
         return true
