@@ -51,7 +51,17 @@ extension MiloAPIClient {
               let environment = entitlements["aps-environment"] as? String
         else { return nil }
 
-        return environment
+        // Deux vocabulaires pour la même chose : Apple écrit `development` dans
+        // l'entitlement, alors que Milō — qui raisonne en hôtes APNs — attend
+        // `sandbox`. Transmettre la valeur brute donne un 422 que le client
+        // avalait sans rien dire, puisqu'il ne lit que `status`. La traduction
+        // vit ici plutôt que côté serveur : c'est nous qui parlons le dialecte
+        // des entitlements, Milō n'a pas à le connaître.
+        switch environment {
+        case "development": return "sandbox"
+        case "production": return "production"
+        default: return nil
+        }
     }
 
     /// Le profil du bundle courant, puis celui de l'app conteneur en repli.
