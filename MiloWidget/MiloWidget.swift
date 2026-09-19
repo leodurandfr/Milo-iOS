@@ -12,5 +12,6 @@ struct MiloWidget: Widget {
         .description("Contrôlez le volume de Milo.")
         .supportedFamilies([.systemSmall])
         .contentMarginsDisabled()
+        .pushHandler(MiloWidgetPushHandler.self)
     }
 }
