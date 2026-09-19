@@ -79,45 +79,72 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         guard let raw = track.artworkURL else { return nil }
         let absolute = raw.hasPrefix("/") ? MiloAPIClient.baseURL() + raw : raw
         guard let url = URL(string: absolute) else { return nil }
-        return Artwork(id: raw) { size in
-            // Deux clés, succès et échec séparés : une seule clé était écrasée
-            // par l'appel suivant, et c'est toujours un succès qui arrivait en
-            // dernier — l'échec qu'on cherchait n'était jamais lisible.
-            func note(_ key: String, _ step: String) {
+        return Artwork(id: raw) { _ in
+            // Le fichier déposé par l'app d'abord : c'est le chemin nominal, et
+            // le seul qui tienne dans le budget de dix secondes du système.
+            if let file = MiloAPIClient.artworkCacheFile(for: raw),
+               let data = try? Data(contentsOf: file), !data.isEmpty,
+               let source = CGImageSourceCreateWithData(data as CFData, nil),
+               let image = Self.bounded(source) {
                 UserDefaults(suiteName: MiloAPIClient.appGroupID)?
-                    .set("\(url.lastPathComponent) @\(Int(size.width))pt \(step)", forKey: key)
+                    .set("cache \(data.count)o \(image.width)x\(image.height)",
+                         forKey: "milo_artwork_trace")
+                return try ArtworkRepresentation(cgImage: image)
             }
-            do {
-                let (data, response) = try await URLSession.shared.data(from: url)
-                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-                guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
-                    note("milo_artwork_fail", "HTTP \(code), \(data.count) o, source illisible")
-                    return try ArtworkRepresentation(data: data)
-                }
 
-                // Redimensionner à ce que le système demande, au lieu de lui
-                // rendre l'original. Les pochettes de stations font 1024×1024
-                // pour un affichage de 156 points, et une extension a un budget
-                // mémoire bien plus étroit qu'une app.
-                let pixels = max(size.width, size.height) * 3
-                let options: [CFString: Any] = [
-                    kCGImageSourceCreateThumbnailFromImageAlways: true,
-                    kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceThumbnailMaxPixelSize: max(Int(pixels), 256)
-                ]
-                guard let image = CGImageSourceCreateThumbnailAtIndex(
-                        source, 0, options as CFDictionary) else {
-                    note("milo_artwork_fail", "HTTP \(code), \(data.count) o, vignette nil")
-                    return try ArtworkRepresentation(data: data)
-                }
+            // Décodage par ImageIO puis `cgImage`, sans redimensionnement.
+            //
+            // Une version intermédiaire produisait une vignette à la taille
+            // demandée — ce qui est en principe la bonne façon de faire, une
+            // pochette de station faisant 1024×1024 pour un affichage de
+            // 69 points. Elle a fait disparaître toutes les pochettes, y compris
+            // celles qui marchaient, et sans laisser la moindre trace : ni
+            // succès, ni échec, alors que les deux étaient écrits dans des clés
+            // séparées. Une extension qui meurt n'écrit rien.
+            //
+            // Cette forme-ci est celle dont on a la preuve qu'elle aboutit
+            // (mesuré : JPEG 600×600, 72 ko, décodé et rendu). Y revenir tant
+            // qu'on n'a pas les journaux système de l'extension.
+            let (data, response) = try await URLSession.shared.data(from: url)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
 
-                let rep = try ArtworkRepresentation(cgImage: image)
-                note("milo_artwork_ok", "HTTP \(code), \(data.count) o -> \(image.width)x\(image.height)")
-                return rep
-            } catch {
-                note("milo_artwork_fail", "échec : \(error)")
-                throw error
+            func note(_ step: String) {
+                UserDefaults(suiteName: MiloAPIClient.appGroupID)?
+                    .set("\(url.lastPathComponent) HTTP \(code) \(data.count)o \(step)",
+                         forKey: "milo_artwork_trace")
             }
+
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+                note("source illisible, repli données brutes")
+                return try ArtworkRepresentation(data: data)
+            }
+
+            // Borner la taille. Mesuré : une pochette décodée en 600×600
+            // s'affiche, la même chaîne en 1024×1024 ne s'affiche pas, alors que
+            // le téléchargement et le décodage réussissent dans les deux cas —
+            // ce qui casse est en aval de nous.
+            //
+            // La borne est une constante, et c'est délibéré : une version
+            // précédente la calculait depuis la taille demandée par le système,
+            // avec un `Int(size.width)`. Une conversion qui **piège** en Swift
+            // si la valeur est nulle ou non finie, ce qui tue l'extension sans
+            // rien écrire — d'où « aucune image et aucune trace », jusque sur
+            // les pochettes qui marchaient. On ne convertit plus rien.
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 600
+            ]
+            if let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+                note("vignette \(image.width)x\(image.height)")
+                return try ArtworkRepresentation(cgImage: image)
+            }
+            if let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+                note("original \(image.width)x\(image.height)")
+                return try ArtworkRepresentation(cgImage: image)
+            }
+            note("repli données brutes")
+            return try ArtworkRepresentation(data: data)
         }
     }
 
@@ -201,6 +228,29 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                 ]
             )
         }
+    }
+
+    /// Décode en bornant la taille.
+    ///
+    /// Tout le reste a été éliminé par la mesure : le fichier est lu depuis le
+    /// cache partagé, décodé, et rendu au système — et il ne s'affiche pourtant
+    /// pas. La seule différence restante avec les pochettes qui passent est la
+    /// taille : 600×600 s'affiche, 1024×1024 non, et le journal système demande
+    /// un `fittingSize` de 171 points.
+    ///
+    /// La borne est une constante, délibérément. Une version antérieure la
+    /// calculait depuis la taille demandée par le système, avec un
+    /// `Int(size.width)` — conversion qui **piège** en Swift sur une valeur
+    /// nulle ou non finie, et tue l'extension sans rien écrire. On ne convertit
+    /// plus rien.
+    nonisolated static func bounded(_ source: CGImageSource) -> CGImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 600
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+            ?? CGImageSourceCreateImageAtIndex(source, 0, nil)
     }
 
     /// Journal de l'extension, lisible depuis le Mac par le conteneur partagé.

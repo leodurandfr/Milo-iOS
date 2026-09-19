@@ -172,6 +172,12 @@ enum MiloNowPlayingBridge {
                 duration: durationMS / 1000,
                 artworkURL: first("album_art_url", "track_artwork", "favicon")
             )
+
+            // La déposer avant d'annoncer la session : l'extension la lira sur
+            // disque, sans réseau ni délai.
+            if let artwork = track?.artworkURL {
+                await MiloAPIClient.cacheArtwork(from: artwork)
+            }
         }
 
         return MiloSessionAttributes(

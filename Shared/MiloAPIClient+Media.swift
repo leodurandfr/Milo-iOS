@@ -224,3 +224,59 @@ private actor VolumeWriter {
         }
     }
 }
+
+// MARK: - Pochettes en cache
+
+extension MiloAPIClient {
+
+    /// Dossier partagé où l'app dépose les pochettes pour l'extension.
+    static func artworkCacheDirectory() -> URL? {
+        guard let container = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
+        else { return nil }
+        let dir = container.appendingPathComponent("artwork", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Nom de fichier stable pour une URL de pochette.
+    static func artworkCacheFile(for urlString: String) -> URL? {
+        guard let dir = artworkCacheDirectory() else { return nil }
+        // Empreinte simple : le nom doit être stable et sans caractère interdit,
+        // pas résistant aux collisions volontaires.
+        var hash: UInt64 = 5381
+        for byte in urlString.utf8 { hash = hash &* 33 &+ UInt64(byte) }
+        return dir.appendingPathComponent(String(hash, radix: 36))
+    }
+
+    /// Télécharge la pochette depuis l'app et la dépose pour l'extension.
+    ///
+    /// C'est l'app qui va la chercher, jamais l'extension, et pour deux raisons
+    /// mesurées dans les journaux système :
+    ///
+    /// - le système relance un **processus neuf** à chaque demande de pochette,
+    ///   qui doit refaire la résolution mDNS de `milo.local` depuis zéro, et il
+    ///   abandonne au bout de dix secondes (`playbackQueueRequest timed out
+    ///   after 10s`, puis `Catalog returned nil image`) ;
+    /// - ses connexions sortantes sont de toute façon refusées — `Path was
+    ///   denied by NECP policy` — parce qu'une extension ne peut pas demander
+    ///   l'autorisation d'accès au réseau local, faute d'écran.
+    ///
+    /// L'app, elle, tourne déjà, a l'autorisation, et entretient la session.
+    /// Lire un fichier local est instantané et ne peut pas expirer.
+    @discardableResult
+    static func cacheArtwork(from urlString: String) async -> Bool {
+        guard let file = artworkCacheFile(for: urlString) else { return false }
+        if FileManager.default.fileExists(atPath: file.path) { return true }
+
+        let absolute = urlString.hasPrefix("/") ? baseURL() + urlString : urlString
+        guard let url = URL(string: absolute),
+              let (data, response) = try? await URLSession.shared.data(from: url),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              !data.isEmpty
+        else { return false }
+
+        try? data.write(to: file, options: .atomic)
+        return true
+    }
+}
