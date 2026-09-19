@@ -79,17 +79,45 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         guard let raw = track.artworkURL else { return nil }
         let absolute = raw.hasPrefix("/") ? MiloAPIClient.baseURL() + raw : raw
         guard let url = URL(string: absolute) else { return nil }
-        return Artwork(id: raw) { _ in
-            let (data, _) = try await URLSession.shared.data(from: url)
-            // Décodage explicite par ImageIO plutôt que de confier les octets
-            // bruts au framework : les pochettes de stations sont servies en
-            // WebP, format que tout décodeur ne prend pas. ImageIO le gère
-            // depuis longtemps, et passer un CGImage lève le doute.
-            if let source = CGImageSourceCreateWithData(data as CFData, nil),
-               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
-                return try ArtworkRepresentation(cgImage: image)
+        return Artwork(id: raw) { size in
+            // Deux clés, succès et échec séparés : une seule clé était écrasée
+            // par l'appel suivant, et c'est toujours un succès qui arrivait en
+            // dernier — l'échec qu'on cherchait n'était jamais lisible.
+            func note(_ key: String, _ step: String) {
+                UserDefaults(suiteName: MiloAPIClient.appGroupID)?
+                    .set("\(url.lastPathComponent) @\(Int(size.width))pt \(step)", forKey: key)
             }
-            return try ArtworkRepresentation(data: data)
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+                    note("milo_artwork_fail", "HTTP \(code), \(data.count) o, source illisible")
+                    return try ArtworkRepresentation(data: data)
+                }
+
+                // Redimensionner à ce que le système demande, au lieu de lui
+                // rendre l'original. Les pochettes de stations font 1024×1024
+                // pour un affichage de 156 points, et une extension a un budget
+                // mémoire bien plus étroit qu'une app.
+                let pixels = max(size.width, size.height) * 3
+                let options: [CFString: Any] = [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: max(Int(pixels), 256)
+                ]
+                guard let image = CGImageSourceCreateThumbnailAtIndex(
+                        source, 0, options as CFDictionary) else {
+                    note("milo_artwork_fail", "HTTP \(code), \(data.count) o, vignette nil")
+                    return try ArtworkRepresentation(data: data)
+                }
+
+                let rep = try ArtworkRepresentation(cgImage: image)
+                note("milo_artwork_ok", "HTTP \(code), \(data.count) o -> \(image.width)x\(image.height)")
+                return rep
+            } catch {
+                note("milo_artwork_fail", "échec : \(error)")
+                throw error
+            }
         }
     }
 

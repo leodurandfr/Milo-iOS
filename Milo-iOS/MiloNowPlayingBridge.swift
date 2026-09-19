@@ -23,6 +23,26 @@ enum MiloNowPlayingBridge {
 
     private static var pump: Task<Void, Never>?
 
+    /// Ce qui, dans les attributs, change réellement ce qui est affiché.
+    private static var lastSignature = ""
+
+    private static func displaySignature(_ a: MiloSessionAttributes) -> String {
+        let track = a.currentTrack
+        let speakers = a.devices
+            .map { "\($0.id)=\(Int(($0.volume * 1000).rounded()))" }
+            .joined(separator: ",")
+        return [
+            a.isPlaying ? "1" : "0",
+            track?.id ?? "-",
+            track?.title ?? "-",
+            track?.artist ?? "-",
+            track?.album ?? "-",
+            track?.artworkURL ?? "-",
+            String(Int((track?.duration ?? 0).rounded())),
+            speakers
+        ].joined(separator: "|")
+    }
+
     /// Entretient la session tant que l'app est au premier plan.
     ///
     /// Sans ça, la session gardait ce qui était vrai au lancement : on voyait
@@ -52,16 +72,44 @@ enum MiloNowPlayingBridge {
             return
         }
 
+        // Ne pousser que ce qui change l'affichage.
+        //
+        // Pousser toutes les deux secondes faisait reconstruire la session à
+        // chaque fois — mesuré, quatre fois en deux secondes — et chaque
+        // reconstruction jette l'objet `Artwork` en cours avec son
+        // téléchargement : la pochette n'avait jamais le temps d'arriver.
+        //
+        // La position n'entre pas dans la signature, délibérément : elle change
+        // en permanence, et `MediaPlaybackSnapshot` porte déjà un horodatage à
+        // partir duquel le système interpole. L'annoncer à chaque seconde ne
+        // dirait rien de plus et coûterait tout.
+        let signature = displaySignature(attributes)
+        if session != nil, signature == lastSignature { return }
+
         do {
             if let session {
                 try await session.update(attributes)
+                lastSignature = signature
                 note("update ok (\(attributes.id))")
             } else {
+                // Terminer ce qui traîne avant d'ouvrir. Le framework met en
+                // cache les sessions rendues par l'extension et leur route les
+                // mises à jour suivantes : une session ouverte par un lancement
+                // précédent survit, et le système continue de parler à
+                // l'instance d'alors — avec le code d'alors. En développement ça
+                // fait exécuter une version périmée de l'extension ; en usage
+                // normal ça laisse une session orpheline que plus personne
+                // n'entretient.
+                for stale in try await RemoteMediaSession<MiloSessionAttributes>.sessions() {
+                    try? await stale.end()
+                }
+
                 let fresh = try await RemoteMediaSession.start(attributes: attributes)
                 session = fresh
                 // Ne vaut que depuis le premier plan : en arrière-plan la
                 // demande est ignorée, sans erreur.
                 try await fresh.requestToBecomeSystemPrimary()
+                lastSignature = signature
                 note("start ok (\(attributes.id)), primary demandé")
             }
         } catch {
