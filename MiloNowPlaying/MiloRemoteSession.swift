@@ -464,24 +464,58 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     var devices: [MediaDevice] {
         Self.runProbeOnce()
         miloLog.info("devices lu : \(self.attributes.devices.count, privacy: .public) enceinte(s)")
-        return attributes.devices.map { device in
+
+        let shown = attributes.devices.map { (device: $0, level: Self.displayedVolume($0)) }
+
+        // La base du prochain geste, tracée quand elle change. Le système ne
+        // pose pas la valeur du curseur : il **multiplie** les niveaux qu'on lui
+        // donne par un facteur commun — mesuré le 19/09/2026, trois enceintes,
+        // même rapport à sept chiffres. Sans cette base au journal, le facteur
+        // qu'il applique ensuite n'est pas interprétable.
+        Self.traceBase(shown
+            .map { "\($0.device.id)=\(((($0.level * 10000).rounded()) / 10000))" }
+            .joined(separator: " "))
+
+        return shown.map { device, level in
             MediaDevice(
                 id: device.id,
                 name: device.name,
                 type: Self.deviceType(device.type),
                 capabilities: [
-                    .absoluteVolume(device.volume) { level in
+                    .absoluteVolume(level) { newLevel in
                         // Tracé AVANT le réseau : « rien ne se passe » ne
                         // distingue pas une fermeture jamais appelée d'une
                         // requête qui échoue, et ce sont deux causes opposées.
-                        miloLog.info("RAPPEL VOLUME \(device.id, privacy: .public) -> \(level, privacy: .public)")
-                        Self.trace("onChange \(device.id) -> \(level)")
+                        miloLog.info("RAPPEL VOLUME \(device.id, privacy: .public) -> \(newLevel, privacy: .public)")
+                        Self.trace("onChange \(device.id) -> \(newLevel)")
                         await MiloAPIClient.setClientVolume(mac: device.id,
-                                                            normalized: level)
+                                                            normalized: newLevel)
                     }
                 ]
             )
         }
+    }
+
+    /// Le niveau à montrer pour cette enceinte : ce que le doigt vient de
+    /// demander tant que c'est assez frais, sinon ce que Milō rapporte.
+    ///
+    /// Le même raccommodage existe déjà dans l'app — `buildDevices` — mais il
+    /// ne couvre que le chemin de l'app. Des attributs arrivés par APNs sont
+    /// construits par Milō, qui ignore tout d'une écriture encore en vol : un
+    /// `update` qui atterrit **pendant** un glissement repose alors un niveau
+    /// d'avant. Et comme le système recalcule son facteur sur la base qu'on lui
+    /// rend, le reste du geste s'applique à partir d'un niveau périmé —
+    /// c'est-à-dire avec le mauvais écart.
+    ///
+    /// Mesuré le 19/09/2026 : `update reçu` apparaît deux fois au milieu d'un
+    /// glissement de six secondes, et l'app pousse de toute façon sa propre
+    /// passe toutes les deux secondes tant qu'elle est au premier plan.
+    private static func displayedVolume(_ device: MiloSessionAttributes.Device) -> Float {
+        guard let db = MiloAPIClient.optimisticVolume(mac: device.id) else { return device.volume }
+        let limits = MiloAPIClient.volumeLimits()
+        let span = limits.max - limits.min
+        guard span > 0 else { return device.volume }
+        return Float(min(max((db - limits.min) / span, 0), 1))
     }
 
     /// Ce que sont vraiment les octets qu'on s'apprête à rendre.
@@ -507,11 +541,43 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// Journal de l'extension, lisible depuis le Mac par le conteneur partagé.
     /// L'extension n'a pas d'écran et ses logs système ne se lisent qu'en USB
     /// avec les droits root ; l'app group est le seul canal praticable.
+    /// Le verrou n'est pas une précaution de style : ce journal est une
+    /// lecture-modification-écriture d'un tableau, et les rappels de volume
+    /// arrivent par rafales de trois dans la même milliseconde. Sans lui, des
+    /// lignes se perdent — et c'est ainsi qu'un geste a paru n'avoir touché que
+    /// deux enceintes sur trois alors que les valeurs optimistes, écrites par le
+    /// même rappel, portaient bien les trois.
+    private static let traceLock = NSLock()
+
+    /// Les secondes ne suffisent pas à ordonner une rafale.
+    private static let traceClock: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
+
     nonisolated static func trace(_ message: String) {
+        traceLock.lock()
+        defer { traceLock.unlock() }
         let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID)
         var lines = defaults?.stringArray(forKey: "milo_ext_trace") ?? []
-        lines.append("\(Date().formatted(date: .omitted, time: .standard)) \(message)")
-        defaults?.set(Array(lines.suffix(20)), forKey: "milo_ext_trace")
+        lines.append("\(traceClock.string(from: Date())) \(message)")
+        // Soixante plutôt que vingt : un glissement de quelques secondes sur
+        // trois enceintes dépassait la fenêtre avant même d'être relu.
+        defaults?.set(Array(lines.suffix(60)), forKey: "milo_ext_trace")
+    }
+
+    /// N'écrit que si la base a bougé : `devices` est relu à chaque changement
+    /// observé, et le tracer à chaque lecture chasserait le geste du journal.
+    nonisolated(unsafe) private static var lastBase = ""
+
+    nonisolated private static func traceBase(_ base: String) {
+        traceLock.lock()
+        let changed = base != lastBase
+        lastBase = base
+        traceLock.unlock()
+        guard changed else { return }
+        trace("base \(base)")
     }
 
     private static func deviceType(_ raw: String) -> MediaDevice.DeviceType {
