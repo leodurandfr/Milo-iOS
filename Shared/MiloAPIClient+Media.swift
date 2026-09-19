@@ -266,17 +266,40 @@ extension MiloAPIClient {
     /// Lire un fichier local est instantané et ne peut pas expirer.
     @discardableResult
     static func cacheArtwork(from urlString: String) async -> Bool {
-        guard let file = artworkCacheFile(for: urlString) else { return false }
-        if FileManager.default.fileExists(atPath: file.path) { return true }
+        // Chaque étape est tracée : cinq `guard` qui retournent `false` ne
+        // disent pas lequel a échoué, et c'est exactement ce qui a fait perdre
+        // le plus de temps aujourd'hui.
+        func note(_ step: String) {
+            UserDefaults(suiteName: appGroupID)?.set(step, forKey: "milo_cache_trace")
+        }
+
+        guard let file = artworkCacheFile(for: urlString) else {
+            note("pas de conteneur partagé"); return false
+        }
+        if FileManager.default.fileExists(atPath: file.path) {
+            let size = (try? FileManager.default
+                .attributesOfItem(atPath: file.path)[.size] as? Int) ?? nil
+            note("déjà en cache (\(size ?? -1) o) \(file.path)")
+            return true
+        }
 
         let absolute = urlString.hasPrefix("/") ? baseURL() + urlString : urlString
-        guard let url = URL(string: absolute),
-              let (data, response) = try? await URLSession.shared.data(from: url),
-              (response as? HTTPURLResponse)?.statusCode == 200,
-              !data.isEmpty
-        else { return false }
+        guard let url = URL(string: absolute) else {
+            note("URL invalide : \(absolute)"); return false
+        }
 
-        try? data.write(to: file, options: .atomic)
-        return true
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            guard code == 200, !data.isEmpty else {
+                note("HTTP \(code), \(data.count) o"); return false
+            }
+            try data.write(to: file, options: .atomic)
+            note("déposé \(data.count) o dans \(file.path)")
+            return true
+        } catch {
+            note("échec \(url.lastPathComponent) : \(error.localizedDescription)")
+            return false
+        }
     }
 }
