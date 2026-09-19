@@ -283,10 +283,44 @@ extension MiloAPIClient {
             note("URL invalide : \(absolute)"); return false
         }
 
+        // Cette fonction est attendue avant l'annonce de la session, et le
+        // sondage repasse toutes les deux secondes. Une pochette qui n'arrive
+        // pas ne doit donc rien retenir : avec les 60 s par défaut d'une
+        // `URLSession`, un CDN muet gelait position, titre et volume pendant
+        // une minute entière. Six secondes suffisent à `mzstatic` sur un
+        // Wi-Fi médiocre, et bornent la perte à une cadence.
+        //
+        // Toutes les autres requêtes du projet bornent déjà la leur ; celle-ci
+        // était la seule à ne pas le faire.
+        var request = URLRequest(url: url)
+        request.timeoutInterval = artworkTimeout
+
+        // Et une fois qu'elle a échoué, ne pas la redemander au tour suivant.
+        // Rien n'est écrit en cas d'échec, donc la boucle revient ici deux
+        // secondes plus tard pour réattendre six secondes, indéfiniment — le
+        // scénario que la remarque sur le SVG, plus bas, cherchait déjà à
+        // éviter. On laisse passer une accalmie avant de retenter la même URL.
+        //
+        // La quarantaine est tenue **par URL**, et non comme un créneau unique
+        // que le premier succès venu effacerait : en radio, deux URL alternent.
+        // Une piste reconnue donne `track_artwork` sur `mzstatic`, qui passe
+        // par Internet et peut expirer ; les trous de reconnaissance donnent
+        // `favicon`, servi par Milō sur le LAN, qui réussit presque toujours.
+        // Un créneau unique se serait donc fait effacer par chaque favicon, et
+        // la piste suivante aurait repayé les six secondes en entier.
+        if let failedAt = artworkFailures[absolute] {
+            let since = Date().timeIntervalSince(failedAt)
+            if since < artworkRetryDelay {
+                note("en quarantaine depuis \(Int(since)) s : \(absolute)")
+                return false
+            }
+        }
+
         do {
-            let (data, response) = try await URLSession.shared.data(from: url)
+            let (data, response) = try await URLSession.shared.data(for: request)
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             guard code == 200, !data.isEmpty else {
+                noteArtworkFailure(absolute)
                 note("HTTP \(code), \(data.count) o"); return false
             }
             // Un format qu'ImageIO ne sait pas décoder — un SVG, par exemple —
@@ -298,11 +332,39 @@ extension MiloAPIClient {
             try payload.write(to: file, options: .atomic)
             note("déposé \(payload.count) o dans \(file.path)"
                  + (payload.count == data.count && !isJPEG(payload) ? " (non converti)" : ""))
+            artworkFailures[absolute] = nil
             return true
         } catch {
+            noteArtworkFailure(absolute)
             note("échec \(url.lastPathComponent) : \(error.localizedDescription)")
             return false
         }
+    }
+
+    /// Ce qu'on accorde au CDN des pochettes avant de rendre la main au
+    /// sondage, et le répit qu'on s'accorde après un échec.
+    private static let artworkTimeout: TimeInterval = 6
+    private static let artworkRetryDelay: TimeInterval = 30
+
+    /// Quand chaque URL de pochette a échoué pour la dernière fois.
+    ///
+    /// `cacheArtwork(from:)` est `async` et non isolée : l'appeler depuis
+    /// `MiloNowPlayingBridge`, qui est pourtant `@MainActor`, ne la fait pas
+    /// tourner sur cet acteur. Ce qui sérialise les accès n'est donc pas
+    /// l'isolation mais la boucle de sondage, qui n'est pas réentrante — voir
+    /// `startPump()`. D'où `nonisolated(unsafe)`, comme `prefersHostname` et
+    /// le `probed` de l'extension.
+    nonisolated(unsafe) private static var artworkFailures: [String: Date] = [:]
+
+    /// Retient l'échec, et oublie ceux que l'accalmie a déjà couverts : sans
+    /// cette purge, la table grossirait d'une entrée par URL morte pour toute
+    /// la vie du processus.
+    private static func noteArtworkFailure(_ url: String) {
+        let now = Date()
+        artworkFailures = artworkFailures.filter {
+            now.timeIntervalSince($0.value) < artworkRetryDelay
+        }
+        artworkFailures[url] = now
     }
 
     private static let artworkCacheGenerationKey = "milo_artwork_cache_generation"
