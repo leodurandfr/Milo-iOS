@@ -352,7 +352,14 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                 // qui démonte le processus ou qui n'a plus besoin de cette
                 // image. Relancer 2,5 s de requête là-dedans ne peut rien
                 // ramener et retient un processus qu'on est en train de tuer.
-                if Task.isCancelled || (error as NSError).code == NSURLErrorCancelled {
+                //
+                // Le domaine est vérifié avant le code : `-999` ne veut dire
+                // « annulé » que dans `NSURLErrorDomain`, et le prendre au mot
+                // ailleurs supprimerait le second essai qu'on vient d'ajouter.
+                let failure = error as NSError
+                if Task.isCancelled
+                    || (failure.domain == NSURLErrorDomain
+                        && failure.code == NSURLErrorCancelled) {
                     throw error
                 }
                 if attempt == attempts { throw error }

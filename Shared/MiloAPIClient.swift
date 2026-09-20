@@ -63,18 +63,6 @@ struct MiloAPIClient {
     /// s'il traîne.
     nonisolated(unsafe) static var prefersHostname = false
 
-    /// Qui a le droit de **vider** l'adresse en cache.
-    ///
-    /// Posé par l'app seule. Les extensions lisent cette clé mais ne peuvent pas
-    /// la repeupler : `resolveAndCacheIPAddress` n'est appelée que depuis le
-    /// sondage de l'app. Un widget rafraîchi hors de la maison échoue, effacerait
-    /// l'adresse, et plus rien ne la réécrirait avant le prochain passage de
-    /// l'app au premier plan — entre temps chaque requête du widget repaierait
-    /// une résolution mDNS dans un processus qui est tué s'il traîne.
-    ///
-    /// Celui qui n'entretient pas le cache ne le jette pas.
-    nonisolated(unsafe) static var maintainsAddressCache = false
-
     /// La connexion à Milō, établie une fois et réutilisée.
     ///
     /// C'est ce que la documentation d'Apple demande explicitement pour une
@@ -192,7 +180,18 @@ struct MiloAPIClient {
                 continuation.resume(returning: resolveIPv4Candidates(for: "milo.local"))
             }
         }
-        guard !candidates.isEmpty else { return }
+        guard !candidates.isEmpty else {
+            // Le nom n'a rien rendu. Marqué comme une passe infructueuse, sans
+            // quoi chaque sondage repaie un `getaddrinfo` bloquant — c'est
+            // précisément ce que le répit existe pour borner.
+            //
+            // L'adresse en cache est **gardée**, contrairement à la branche du
+            // dessous : une résolution qui échoue ne dit rien de la validité de
+            // ce qu'on avait déjà. Si elle est morte, c'est à la requête qui
+            // s'en sert de le découvrir — voir `forgetCachedIPAddress`.
+            defaults.set(Date().timeIntervalSince1970, forKey: ipProbedAtKey)
+            return
+        }
 
         guard let ip = await firstReachable(among: candidates, probe: { await respondsAsMilo($0) })
         else {
@@ -281,6 +280,15 @@ struct MiloAPIClient {
     /// Oublier l'adresse en cache après un échec réseau, pour que le sondage
     /// suivant re-résolve au lieu d'attendre les cinq minutes.
     ///
+    /// **Y compris depuis le widget**, qui ne sait pourtant pas repeupler cette
+    /// clé — seul le sondage de l'app appelle `resolveAndCacheIPAddress`. Le
+    /// réserver à l'app a été essayé et retiré le 20/09/2026 : une adresse morte
+    /// que personne n'a le droit de jeter, c'est un widget qui vise le vide
+    /// jusqu'au prochain passage de l'app au premier plan — après un changement
+    /// de bail, indéfiniment. L'effacer coûte une résolution mDNS par requête,
+    /// ce que le widget faisait de toute façon avant que cette clé existe.
+    /// Un ralentissement se préfère à une panne.
+    ///
     /// Appelée sur les erreurs d'`URLSession` uniquement, jamais sur un code HTTP :
     /// une route qui répond 400 prouve que l'adresse est la bonne.
     ///
@@ -288,7 +296,7 @@ struct MiloAPIClient {
     /// déjà la raison d'être du second essai de `sendControl`. On se contente de
     /// ne pas rester collé à une adresse qu'on vient de voir échouer.
     private static func forgetCachedIPAddress(after error: Error) {
-        guard maintainsAddressCache, !prefersHostname else { return }
+        guard !prefersHostname else { return }
         let error = error as NSError
         guard error.domain == NSURLErrorDomain else { return }
         // Énumérés plutôt que « toute erreur d'URL » : `NSURLErrorCancelled`
