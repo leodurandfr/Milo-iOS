@@ -514,10 +514,17 @@ enum MiloNowPlayingBridge {
     ///
     /// Les noms ne sont pas dans `/api/volume/state` — seules les zones y sont
     /// nommées, si bien que deux enceintes d'une même zone s'appelaient toutes
-    /// deux « Salon ». Ils vivent dans `/api/multiroom/state`, qui donne aussi
-    /// `online` et `volume_control` : une enceinte éteinte n'a rien à faire dans
-    /// la liste, et une enceinte sans contrôle de volume ne doit pas afficher un
-    /// curseur qui ne fera rien.
+    /// deux « Salon ». Ils vivent dans `/api/multiroom/state`, qui n'est plus
+    /// interrogé que pour eux.
+    ///
+    /// Le niveau et le filtre viennent tous deux de `/api/volume/state` : il
+    /// porte maintenant `volume` (0…1, normalisé par Milō sur ses propres
+    /// bornes), `available` et `volume_control`. Prendre les trois à la même
+    /// source est ce qui met cette liste d'accord avec celle que Milō pousse
+    /// par APNs, et avec la moyenne qu'il appelle son volume global — les
+    /// mêmes enceintes exactement, aux mêmes niveaux, sur la même échelle.
+    /// Reconvertir `volume_db` ici avec des bornes gardées de notre côté est
+    /// précisément ce qui faisait diverger l'app ouverte et l'app endormie.
     private static func buildDevices() async -> [MiloSessionAttributes.Device] {
         async let volumeTask = MiloAPIClient.get(path: "/api/volume/state")
         async let roomsTask = MiloAPIClient.get(path: "/api/multiroom/state")
@@ -532,25 +539,21 @@ enum MiloNowPlayingBridge {
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             .flatMap { $0?["clients"] as? [String: [String: Any]] } ?? [:]
 
-        let limits = MiloAPIClient.volumeLimits()
-        let span = limits.max - limits.min
-
         return clients.keys.sorted().compactMap { mac -> MiloSessionAttributes.Device? in
-            let room = rooms[mac]
-            guard room?["online"] as? Bool ?? true else { return nil }
-            guard room?["volume_control"] as? Bool ?? true else { return nil }
+            let client = clients[mac]
+            guard client?["available"] as? Bool ?? true else { return nil }
+            guard client?["volume_control"] as? Bool ?? true else { return nil }
 
             // Ce qu'on vient de demander l'emporte sur ce que Milō rapporte
             // pendant quelques secondes : sinon cette boucle repousse un niveau
             // lu avant l'écriture, et le curseur recule sous le doigt.
-            let db = MiloAPIClient.optimisticVolume(mac: mac)
-                ?? clients[mac]?["volume_db"] as? Double ?? limits.min
-            let normalized = span > 0 ? (db - limits.min) / span : 0
+            let level = MiloAPIClient.optimisticLevel(mac: mac)
+                ?? client?["volume"] as? Double ?? 0
             return MiloSessionAttributes.Device(
                 id: mac,
-                name: room?["name"] as? String ?? "Milō \(mac.suffix(5))",
+                name: rooms[mac]?["name"] as? String ?? "Milō \(mac.suffix(5))",
                 type: "speaker",
-                volume: Float(min(max(normalized, 0), 1))
+                volume: Float(min(max(level, 0), 1))
             )
         }
     }

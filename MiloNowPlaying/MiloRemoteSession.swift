@@ -446,9 +446,11 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// Un `MediaDevice` par client snapcast : l'utilisateur obtient un curseur
     /// par pièce dans le Centre de contrôle.
     ///
-    /// Le niveau affiché arrive déjà normalisé 0…1 de Milō. À l'écriture il faut
-    /// refaire le chemin inverse, parce que le backend raisonne en dB — et c'est
-    /// bien une écriture **absolue** : convertir en delta contre
+    /// Le niveau arrive normalisé 0…1 de Milō, et repart tel quel : Milō accepte
+    /// désormais `volume` sur cette même échelle. L'extension ne convertit plus
+    /// rien en décibels, et ne lit donc plus `volume_limits` — la copie qu'elle
+    /// en gardait était périmée, et c'est elle qui faisait monter le son de
+    /// trois fois trop peu. C'est toujours une écriture **absolue** : passer par
     /// `/api/volume/adjust` serait une lecture-modification-écriture en course
     /// contre l'encodeur rotatif de l'appareil.
     var devices: [MediaDevice] {
@@ -456,19 +458,20 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
 
         let shown = attributes.devices.map { (device: $0, level: Self.displayedVolume($0)) }
 
-        // La base du prochain geste, tracée quand elle change. Le système ne
-        // pose pas la valeur du curseur : il **multiplie** les niveaux qu'on lui
-        // donne par un facteur commun — mesuré le 19/09/2026, trois enceintes,
-        // même rapport à sept chiffres. Sans cette base au journal, le facteur
-        // qu'il applique ensuite n'est pas interprétable.
+        // Ce que le système a sous les yeux, figé ici et passé en entier à
+        // chaque rappel. Il en faut l'ensemble, pas seulement un compte : le
+        // curseur maître ne pose pas une valeur, il **multiplie** les niveaux
+        // qu'on lui rend par un facteur commun — mesuré le 19/09/2026, trois
+        // enceintes, même rapport à sept chiffres — et ses rafales ne portent
+        // pas toujours les mêmes enceintes. Reconstituer la moyenne qu'il vise
+        // demande donc de savoir où sont celles qu'une rafale n'a pas citées.
+        let snapshot = Dictionary(uniqueKeysWithValues: shown.map { ($0.device.id, $0.level) })
+
+        // Tracée quand elle change : sans elle au journal, le facteur que le
+        // système applique ensuite n'est pas interprétable.
         Self.traceBase(shown
             .map { "\($0.device.id)=\(((($0.level * 10000).rounded()) / 10000))" }
             .joined(separator: " "))
-
-        // Le nombre d'enceintes que le système a sous les yeux, figé ici : c'est
-        // lui qui dit si une rafale les a toutes touchées, donc si le geste
-        // portait sur le curseur global.
-        let count = shown.count
 
         return shown.map { device, level in
             MediaDevice(
@@ -483,9 +486,8 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                         miloLog.info("RAPPEL VOLUME \(device.id, privacy: .public) -> \(newLevel, privacy: .public)")
                         Self.trace("onChange \(device.id) -> \(newLevel)")
                         await MiloAPIClient.applyVolume(mac: device.id,
-                                                        from: level,
                                                         to: newLevel,
-                                                        deviceCount: count)
+                                                        snapshot: snapshot)
                     }
                 ]
             )
@@ -506,12 +508,15 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// Mesuré le 19/09/2026 : `update reçu` apparaît deux fois au milieu d'un
     /// glissement de six secondes, et l'app pousse de toute façon sa propre
     /// passe toutes les deux secondes tant qu'elle est au premier plan.
+    ///
+    /// Les deux valeurs sont désormais sur la même échelle, celle du curseur.
+    /// Tant qu'elles ne l'étaient pas — un niveau venu de Milō normalisé sur
+    /// -78…-8, une valeur optimiste reconvertie sur -80…-21 — ce choix entre
+    /// les deux déplaçait le curseur à lui seul, à chaque expiration de la
+    /// fenêtre.
     private static func displayedVolume(_ device: MiloSessionAttributes.Device) -> Float {
-        guard let db = MiloAPIClient.optimisticVolume(mac: device.id) else { return device.volume }
-        let limits = MiloAPIClient.volumeLimits()
-        let span = limits.max - limits.min
-        guard span > 0 else { return device.volume }
-        return Float(min(max((db - limits.min) / span, 0), 1))
+        guard let level = MiloAPIClient.optimisticLevel(mac: device.id) else { return device.volume }
+        return Float(level)
     }
 
     /// Ce que sont vraiment les octets qu'on s'apprête à rendre.

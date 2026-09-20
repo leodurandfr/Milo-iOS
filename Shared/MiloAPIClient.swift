@@ -402,6 +402,18 @@ struct MiloAPIClient {
 
     /// Bornes de repli, en vigueur tant que `/api/settings/bulk` n'a pas répondu.
     ///
+    /// **Ces bornes ne servent qu'au widget et aux App Intents**, qui raisonnent
+    /// vraiment en décibels — le widget affiche un niveau, les intents ajoutent
+    /// un pas — et qui appellent `syncVolumeSettings()` dans la même passe que
+    /// leur lecture. Le chemin Now Playing, lui, ne convertit plus rien : il
+    /// parle à Milō sur l'échelle 0…1 du curseur et le laisse posséder ses
+    /// bornes. Ne pas l'y ramener. L'extension Now Playing n'appelle pas
+    /// `syncVolumeSettings()` et ne peut pas se le permettre — un processus que
+    /// `mediaremoted` termine en quelques secondes, avec trois secondes de
+    /// budget réseau par commande — si bien que sa copie restait celle-ci
+    /// indéfiniment : elle a converti sur -80…-21 pendant que l'appareil
+    /// tournait sur -78…-8, et le volume montait trois fois moins que demandé.
+    ///
     /// Le repli haut ne doit surtout pas être 0 dB : aucun Milō n'autorise le volume
     /// jusqu'à 0, si bien qu'un widget non encore synchronisé affichait une valeur
     /// optimiste que le backend n'appliquerait jamais, puis la voyait reculer à la

@@ -8,62 +8,163 @@ import Foundation
 /// porte des niveaux absolus : ce sont eux qui disent où le doigt a laissé la
 /// poignée. Ces tests figent ça, parce que la relecture du facteur comme un gain
 /// a été essayée le 20/09/2026 et rendait les extrémités inatteignables.
+///
+/// Tout est sur l'échelle du curseur, 0…1, et plus du tout en décibels : la
+/// conversion appartient à Milō, qui seul connaît ses bornes. Des chiffres en
+/// décibels réapparaissant ici seraient le signe que la conversion est revenue.
 struct VolumeGestureTests {
 
-    let limits = (min: -78.0, max: -8.0)
+    /// Les trois niveaux mesurés le 20/09/2026 sur un vrai glissement.
+    let measured = ["a": 0.4264775, "b": 0.4300078, "c": 0.43415198]
 
     @Test("On applique le niveau demandé, pas un dérivé du facteur")
     func targetIsTheRequestedLevel() throws {
-        // Mesuré : le système demande 0.4265 / 0.4300 / 0.4342, soit -47,9 dB
-        // en moyenne sur une plage -78…-8. La lecture en gain donnait -54,7.
-        let asked = [0.4264775, 0.4300078, 0.43415198].map { -78 + $0 * 70 }
+        let target = try #require(
+            MiloAPIClient.globalTarget(touched: measured, snapshot: measured))
 
-        let target = try #require(MiloAPIClient.globalTarget(targetDBs: asked, limits: limits))
-
-        #expect(abs(target - (-47.885)) < 0.01)
+        // La moyenne des trois. La lecture du facteur comme un gain donnait
+        // 0,33 là où le système en demandait 0,43.
+        #expect(abs(target - 0.43021) < 0.0001)
     }
 
     @Test("Les extrémités sont atteignables")
     func extremesAreReachable() throws {
-        let top = try #require(MiloAPIClient.globalTarget(targetDBs: [-8, -8, -8], limits: limits))
-        let bottom = try #require(MiloAPIClient.globalTarget(targetDBs: [-78, -78, -78], limits: limits))
+        let top = try #require(MiloAPIClient.globalTarget(
+            touched: ["a": 1, "b": 1, "c": 1], snapshot: measured))
+        let bottom = try #require(MiloAPIClient.globalTarget(
+            touched: ["a": 0, "b": 0, "c": 0], snapshot: measured))
 
-        #expect(top == limits.max)
-        #expect(bottom == limits.min)
+        #expect(top == 1)
+        #expect(bottom == 0)
     }
 
     @Test("Hors bornes, on borne")
     func targetIsClamped() throws {
-        #expect(try #require(MiloAPIClient.globalTarget(targetDBs: [0], limits: limits)) == limits.max)
-        #expect(try #require(MiloAPIClient.globalTarget(targetDBs: [-200], limits: limits)) == limits.min)
+        #expect(try #require(MiloAPIClient.globalTarget(
+            touched: ["a": 4], snapshot: ["a": 0.5])) == 1)
+        #expect(try #require(MiloAPIClient.globalTarget(
+            touched: ["a": -4], snapshot: ["a": 0.5])) == 0)
     }
 
     @Test("Sans enceinte, rien à viser")
     func emptyIsRejected() {
-        #expect(MiloAPIClient.globalTarget(targetDBs: [], limits: limits) == nil)
+        #expect(MiloAPIClient.globalTarget(touched: [:], snapshot: [:]) == nil)
     }
 
-    @Test("Trois rapports concordants sur trois enceintes : geste global")
-    func concordantRatiosAreGlobal() {
-        // Les vrais chiffres du 20/09 : 1,90000 / 1,90000 / 1,90021.
-        #expect(MiloAPIClient.isGlobalGesture(ratios: [1.90000, 1.90000, 1.90021],
-                                              touched: 3, deviceCount: 3))
+    @Test("Une rafale partielle laisse en place les enceintes qu'elle ne cite pas")
+    func aPartialBurstKeepsUntouchedSpeakersInPlace() throws {
+        // Deux enceintes sur trois montent de 0,43 à 0,86 ; la troisième n'a
+        // pas bougé, et sa place dans la moyenne est son niveau actuel.
+        let snapshot = ["a": 0.43, "b": 0.43, "c": 0.43]
+        let target = try #require(MiloAPIClient.globalTarget(
+            touched: ["a": 0.86, "b": 0.86], snapshot: snapshot))
+
+        #expect(abs(target - 0.7166667) < 0.0001)
+    }
+
+    @Test("Une cible pour une enceinte absente de l'instantané est ignorée")
+    func aTargetForAVanishedSpeakerIsIgnored() throws {
+        // L'enceinte s'est éteinte entre le rendu et la rafale : la moyenne
+        // reste celle des enceintes que le système a réellement sous les yeux.
+        let target = try #require(MiloAPIClient.globalTarget(
+            touched: ["a": 0.8, "disparue": 0.1], snapshot: ["a": 0.8, "b": 0.6]))
+
+        #expect(abs(target - 0.7) < 0.0001)
+    }
+
+    @Test("Deux enceintes touchées : geste global")
+    func twoSpeakersAreGlobal() {
+        #expect(MiloAPIClient.isGlobalGesture(touched: 2, deviceCount: 3))
+    }
+
+    @Test("Une rafale incomplète reste un geste global")
+    func anIncompleteBurstIsStillGlobal() {
+        // L'ancienne règle exigeait `touched == deviceCount` et rejetait
+        // celle-ci, ce qui la faisait repartir en écritures par enceinte.
+        #expect(MiloAPIClient.isGlobalGesture(touched: 2, deviceCount: 4))
+    }
+
+    @Test("Une base quasi nulle ne casse plus la détection")
+    func aNearZeroBaseNoLongerBreaksDetection() {
+        // Une enceinte presque coupée ne rendait plus de rapport exploitable,
+        // et son absence faisait retomber tout le geste en mode par enceinte.
+        // Le compte ne dépend plus d'aucun rapport.
+        #expect(MiloAPIClient.isGlobalGesture(touched: 3, deviceCount: 3))
     }
 
     @Test("Une seule enceinte touchée : curseur individuel")
     func singleSpeakerIsNotGlobal() {
-        #expect(!MiloAPIClient.isGlobalGesture(ratios: [1.9], touched: 1, deviceCount: 3))
-    }
-
-    @Test("Des rapports qui divergent ne sont pas un geste global")
-    func divergentRatiosAreNotGlobal() {
-        #expect(!MiloAPIClient.isGlobalGesture(ratios: [1.9, 1.5, 1.9],
-                                               touched: 3, deviceCount: 3))
+        #expect(!MiloAPIClient.isGlobalGesture(touched: 1, deviceCount: 3))
     }
 
     @Test("Une enceinte seule n'a aucun équilibre à préserver")
     func singleDeviceStaysPerClient() {
-        #expect(!MiloAPIClient.isGlobalGesture(ratios: [1.9], touched: 1, deviceCount: 1))
+        #expect(!MiloAPIClient.isGlobalGesture(touched: 1, deviceCount: 1))
+    }
+}
+
+/// Le niveau optimiste, celui que l'affichage préfère pendant trois secondes.
+///
+/// Il est rangé sur l'échelle du curseur. La version précédente y rangeait des
+/// décibels sous une autre clé, et c'est le seul point de la mise à jour qui
+/// pouvait se voir : un -47,8 relu comme un niveau se borne à 0, soit du
+/// silence affiché.
+/// Une MAC par test, et non une pour la suite : ces tests écrivent tous dans le
+/// **même** conteneur partagé que l'app, et Swift Testing les lance en
+/// parallèle. Une clé commune faisait effacer par le nettoyage de l'un la
+/// valeur que l'autre venait de poser — un échec qui ne dépendait que de
+/// l'ordonnancement.
+struct OptimisticLevelTests {
+
+    /// Efface tout ce qu'un test a pu laisser sous cette MAC, ancienne clé
+    /// comprise.
+    private func forget(_ mac: String) {
+        let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID)
+        defaults?.removeObject(forKey: MiloAPIClient.optimisticLevelKey(mac))
+        defaults?.removeObject(forKey: MiloAPIClient.optimisticVolumeAtKey(mac))
+        defaults?.removeObject(forKey: "milo_opt_vol_\(mac)")
+    }
+
+    @Test("Ce qui est posé est ce que le curseur montre, sans conversion")
+    func theOptimisticLevelIsAlreadyWhatTheSliderShows() throws {
+        let mac = "aabbccdd0001"
+        forget(mac)
+        defer { forget(mac) }
+
+        MiloAPIClient.noteOptimistic(mac: mac, level: 0.72)
+
+        let level = try #require(MiloAPIClient.optimisticLevel(mac: mac))
+        #expect(level == 0.72)
+    }
+
+    @Test("Un décibel laissé par la version précédente n'est pas lu comme un niveau")
+    func aStaleDecibelValueCannotBeReadAsALevel() {
+        let mac = "aabbccdd0002"
+        forget(mac)
+        defer { forget(mac) }
+
+        // Exactement ce que la version précédente laissait derrière elle : une
+        // valeur en dB sous l'ancienne clé, et une estampille fraîche.
+        let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID)
+        defaults?.set(-47.8, forKey: "milo_opt_vol_\(mac)")
+        defaults?.set(Date().timeIntervalSince1970,
+                      forKey: MiloAPIClient.optimisticVolumeAtKey(mac))
+
+        #expect(MiloAPIClient.optimisticLevel(mac: mac) == nil)
+    }
+
+    @Test("Passé la fenêtre, c'est Milō qui reprend la main")
+    func aStaleLevelIsIgnored() {
+        let mac = "aabbccdd0003"
+        forget(mac)
+        defer { forget(mac) }
+
+        let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID)
+        defaults?.set(0.72, forKey: MiloAPIClient.optimisticLevelKey(mac))
+        defaults?.set(Date().timeIntervalSince1970 - MiloAPIClient.optimisticVolumeWindow - 1,
+                      forKey: MiloAPIClient.optimisticVolumeAtKey(mac))
+
+        #expect(MiloAPIClient.optimisticLevel(mac: mac) == nil)
     }
 }
 

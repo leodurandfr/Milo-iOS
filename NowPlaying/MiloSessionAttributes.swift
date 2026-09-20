@@ -46,8 +46,15 @@ struct MiloSessionAttributes: RemoteMediaSessionAttributes {
         let id: String
         let name: String
         let type: String
-        /// Déjà normalisé 0…1 sur `volume_limits` par Milō. Ne pas reconvertir
-        /// pour l'affichage : c'est exactement ce que le curseur attend.
+        /// Déjà normalisé 0…1 sur `volume_limits` par Milō, et c'est exactement
+        /// ce que le curseur attend.
+        ///
+        /// Ne reconvertir dans aucun sens, ni pour l'affichage ni pour
+        /// l'écriture : Milō accepte désormais `volume` sur cette même échelle,
+        /// et la conversion en décibels n'existe plus de ce côté-ci. Elle a
+        /// existé, sur des bornes que l'app gardait en cache et ne rafraîchissait
+        /// jamais — -80…-21 face à -78…-8 sur l'appareil — et c'est ce qui
+        /// faisait monter le son trois fois moins que le doigt ne le demandait.
         let volume: Float
     }
 
