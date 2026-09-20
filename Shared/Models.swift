@@ -28,36 +28,26 @@ struct VolumeStateResponse: Codable {
     let data: VolumeStateData?
 }
 
-struct DockAppsResponse: Codable {
-    let enabled_apps: [String]
-}
-
 struct MiloWidgetData {
     var volumeDB: Double
-    var sourceName: String
     var isConnected: Bool
     var canControlVolume: Bool
     var isMuted: Bool
-    var availableSources: [String]
 
     /// Milō est joignable ET le volume est réellement pilotable
     var isReady: Bool { isConnected && canControlVolume }
 
     static let placeholder = MiloWidgetData(
         volumeDB: -20,
-        sourceName: "spotify",
         isConnected: true,
         canControlVolume: true,
-        isMuted: false,
-        availableSources: ["spotify", "bluetooth", "radio"]
+        isMuted: false
     )
 
     static let disconnected = MiloWidgetData(
         volumeDB: 0,
-        sourceName: "",
         isConnected: false,
         canControlVolume: false,
-        isMuted: false,
-        availableSources: []
+        isMuted: false
     )
 }

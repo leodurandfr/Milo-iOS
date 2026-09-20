@@ -433,19 +433,6 @@ struct MiloAPIClient {
         return step > 0 ? step : volumeStepFallbackDB
     }
 
-    // MARK: - Audio
-
-    static func changeSource(_ name: String) async throws {
-        _ = try await post(path: "/api/audio/source/\(name)")
-    }
-
-    // MARK: - Settings
-
-    static func getDockApps() async throws -> DockAppsResponse {
-        let data = try await get(path: "/api/settings/dock-apps")
-        return try JSONDecoder().decode(DockAppsResponse.self, from: data)
-    }
-
     // MARK: - Transport
 
     /// Interne plutôt que `private` : `MiloAPIClient+Media` vit dans un autre fichier et

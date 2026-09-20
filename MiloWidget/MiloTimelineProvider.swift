@@ -58,11 +58,9 @@ struct MiloTimelineProvider: TimelineProvider {
         if hasRecentInteraction() {
             return MiloWidgetData(
                 volumeDB: MiloAPIClient.sharedDouble(forKey: MiloAPIClient.lastVolumeKey, default: -20),
-                sourceName: "",
                 isConnected: MiloAPIClient.sharedBool(forKey: MiloAPIClient.reachableKey, default: true),
                 canControlVolume: MiloAPIClient.sharedBool(forKey: MiloAPIClient.canControlKey, default: true),
-                isMuted: MiloAPIClient.sharedBool(forKey: MiloAPIClient.mutedKey, default: false),
-                availableSources: []
+                isMuted: MiloAPIClient.sharedBool(forKey: MiloAPIClient.mutedKey, default: false)
             )
         }
 
@@ -85,11 +83,9 @@ struct MiloTimelineProvider: TimelineProvider {
 
             return MiloWidgetData(
                 volumeDB: volume.volumeDB,
-                sourceName: "",
                 isConnected: true,
                 canControlVolume: volume.canControlVolume,
-                isMuted: volume.isMuted,
-                availableSources: []
+                isMuted: volume.isMuted
             )
         } catch {
             MiloAPIClient.cacheReachability(false, canControlVolume: false)
