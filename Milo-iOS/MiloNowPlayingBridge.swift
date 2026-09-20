@@ -162,11 +162,19 @@ enum MiloNowPlayingBridge {
             // et effacer la carte à chaque paquet perdu la ferait clignoter.
             note("pas d'état exploitable depuis Milō")
             return
-        case .rienÀMontrer:
+        case .rienÀMontrer(let seen):
             // Réconcilier d'abord : on ferme ce que le système tient vraiment,
             // pas ce que l'app croit tenir.
             await reconcileSession()
-            await endSession(reason: "aucune source active")
+            guard session != nil else {
+                // Passage muet jusqu'ici, et c'est ce qui a rendu la panne
+                // illisible : le statut gardait son « update ok » d'avant, si
+                // bien qu'une app qui tournait sans rien trouver à fermer
+                // ressemblait trait pour trait à une app qui ne tournait pas.
+                note("rien à montrer (\(seen)), aucune session tenue")
+                return
+            }
+            await endSession(reason: seen)
             return
         case .lecture(let built):
             attributes = built
@@ -403,7 +411,10 @@ enum MiloNowPlayingBridge {
     /// absence de source doit l'effacer.
     private enum MiloState {
         case injoignable
-        case rienÀMontrer
+        /// Porte **ce que Milō a dit**, pas seulement le verdict : sans ça, une
+        /// carte qui reste affichée ne distingue pas « l'app n'a pas tourné »
+        /// de « elle a tourné et n'a rien trouvé à fermer ».
+        case rienÀMontrer(String)
         case lecture(MiloSessionAttributes)
     }
 
@@ -432,7 +443,7 @@ enum MiloNowPlayingBridge {
         if !transitioning,
            source.isEmpty || source == "none" || sourceState != "active"
             || ((metadata?.isEmpty ?? true) && !isPlaying) {
-            return .rienÀMontrer
+            return .rienÀMontrer("\(source.isEmpty ? "-" : source)/\(sourceState.isEmpty ? "-" : sourceState)")
         }
 
         // Millisecondes côté Milō, secondes côté framework.
