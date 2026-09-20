@@ -28,6 +28,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // besoin ici puisque le push widget ne notifie personne.
         application.registerForRemoteNotifications()
 
+        // L'app est le seul processus qui résout `milo.local` et repeuple
+        // l'adresse partagée ; elle est donc aussi le seul qui a le droit de la
+        // jeter. Voir `MiloAPIClient.maintainsAddressCache`.
+        MiloAPIClient.maintainsAddressCache = true
+
         if #available(iOS 26.0, *) {
             Task { await MiloAPIClient.reconcileWidgetPushToken() }
         }

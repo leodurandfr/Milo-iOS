@@ -63,6 +63,18 @@ struct MiloAPIClient {
     /// s'il traîne.
     nonisolated(unsafe) static var prefersHostname = false
 
+    /// Qui a le droit de **vider** l'adresse en cache.
+    ///
+    /// Posé par l'app seule. Les extensions lisent cette clé mais ne peuvent pas
+    /// la repeupler : `resolveAndCacheIPAddress` n'est appelée que depuis le
+    /// sondage de l'app. Un widget rafraîchi hors de la maison échoue, effacerait
+    /// l'adresse, et plus rien ne la réécrirait avant le prochain passage de
+    /// l'app au premier plan — entre temps chaque requête du widget repaierait
+    /// une résolution mDNS dans un processus qui est tué s'il traîne.
+    ///
+    /// Celui qui n'entretient pas le cache ne le jette pas.
+    nonisolated(unsafe) static var maintainsAddressCache = false
+
     /// La connexion à Milō, établie une fois et réutilisée.
     ///
     /// C'est ce que la documentation d'Apple demande explicitement pour une
@@ -133,6 +145,10 @@ struct MiloAPIClient {
     /// `.local` en produit rarement plus de deux.
     private static let candidateProbeTimeout: TimeInterval = 1.5
 
+    /// Quand la dernière passe a échoué, et le répit qu'on s'accorde après.
+    private static let ipProbedAtKey = "milo_ip_probed_at"
+    private static let ipProbeRetryDelay: TimeInterval = 30
+
     /// Résout `milo.local` et mémorise l'adresse **qui répond**, pour le widget.
     ///
     /// `URLSession` ne réécrit pas l'URL de la réponse avec l'adresse résolue :
@@ -155,9 +171,17 @@ struct MiloAPIClient {
     static func resolveAndCacheIPAddress() async {
         guard let defaults = UserDefaults(suiteName: appGroupID) else { return }
 
+        let now = Date().timeIntervalSince1970
         let hasCachedIP = defaults.string(forKey: ipAddressKey)?.isEmpty == false
         let resolvedAt = defaults.object(forKey: ipResolvedAtKey) as? Double ?? 0
-        if hasCachedIP, Date().timeIntervalSince1970 - resolvedAt < ipResolutionInterval { return }
+        if hasCachedIP, now - resolvedAt < ipResolutionInterval { return }
+
+        // Répit après une passe qui n'a rien trouvé, pour ne pas la rejouer à
+        // chaque sondage. Court devant les cinq minutes d'une réussite : ce
+        // qu'on attend ici, c'est que le réseau revienne, pas qu'un bail DHCP
+        // change.
+        let probedAt = defaults.object(forKey: ipProbedAtKey) as? Double ?? 0
+        if now - probedAt < ipProbeRetryDelay { return }
 
         // Hors du pool coopératif : `getaddrinfo` bloque le temps de la
         // résolution, et sur ce réseau la branche unicast peut consommer ses
@@ -176,13 +200,21 @@ struct MiloAPIClient {
             // laisser en place. `baseURL()` retombe alors sur `milo.local`, ce
             // qui donne au moins une chance au tirage suivant, là où une adresse
             // morte en cache condamne toutes les requêtes jusqu'à expiration.
+            //
+            // Le sondage est court — 1,5 s par candidat — donc un creux du Wi-Fi
+            // suffit à faire échouer une adresse parfaitement valide. D'où la
+            // marque de tentative : sans elle, la clé effacée rend `hasCachedIP`
+            // faux, la garde de fraîcheur ne retient plus rien, et **chaque**
+            // sondage repaie `getaddrinfo` et les sondes en entier.
             defaults.removeObject(forKey: ipAddressKey)
             defaults.removeObject(forKey: ipResolvedAtKey)
+            defaults.set(Date().timeIntervalSince1970, forKey: ipProbedAtKey)
             return
         }
 
         defaults.set(ip, forKey: ipAddressKey)
         defaults.set(Date().timeIntervalSince1970, forKey: ipResolvedAtKey)
+        defaults.removeObject(forKey: ipProbedAtKey)
     }
 
     /// Le premier candidat que `probe` accepte, dans l'ordre donné.
@@ -256,7 +288,7 @@ struct MiloAPIClient {
     /// déjà la raison d'être du second essai de `sendControl`. On se contente de
     /// ne pas rester collé à une adresse qu'on vient de voir échouer.
     private static func forgetCachedIPAddress(after error: Error) {
-        guard !prefersHostname else { return }
+        guard maintainsAddressCache, !prefersHostname else { return }
         let error = error as NSError
         guard error.domain == NSURLErrorDomain else { return }
         // Énumérés plutôt que « toute erreur d'URL » : `NSURLErrorCancelled`

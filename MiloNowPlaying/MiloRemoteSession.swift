@@ -348,6 +348,13 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                     \(error.localizedDescription, privacy: .public) \
                     (essai \(attempt, privacy: .public)/\(attempts, privacy: .public))
                     """)
+                // Une annulation n'est pas un tirage perdu : c'est le système
+                // qui démonte le processus ou qui n'a plus besoin de cette
+                // image. Relancer 2,5 s de requête là-dedans ne peut rien
+                // ramener et retient un processus qu'on est en train de tuer.
+                if Task.isCancelled || (error as NSError).code == NSURLErrorCancelled {
+                    throw error
+                }
                 if attempt == attempts { throw error }
                 // Rien à attendre avant de retenter : la boucle rouvre une
                 // connexion, et c'est le nouveau tirage qu'on veut.

@@ -738,58 +738,99 @@ extension MiloAPIClient {
     /// Internet sans toucher au LAN, donc sans rien tirer au sort ; les
     /// précharger ne réparerait rien et remplirait le cache pour rien.
     ///
-    /// Appelée au passage au premier plan, pas dans la boucle : la liste des
-    /// stations pèse une centaine de kilooctets, ce qui n'a rien à faire dans un
-    /// sondage de deux secondes. `cacheArtwork` juge ensuite sur les octets
-    /// d'en-tête et sort aussitôt pour ce qui est déjà là.
+    /// Appelée au passage au premier plan, pas dans la boucle : même réduit à
+    /// huit kilooctets, un aller-retour de plus n'a rien à faire dans un sondage
+    /// de deux secondes. `cacheArtwork` juge ensuite sur les octets d'en-tête et
+    /// sort aussitôt pour ce qui est déjà là.
+    ///
+    /// `favorites_only=true` et pas la liste nue : **`/api/radio/stations` est
+    /// une vue de parcours**, trois cents stations dont cinq seulement portent
+    /// `is_favorite: true`. Les favoris sont vingt-deux. Mesuré le 20/09/2026 :
+    /// 300 stations et 112 ko sans le paramètre, 22 stations et 8 ko avec — et
+    /// les dix-sept manquantes incluaient `6239161eaee1.webp`, la station même
+    /// dont l'absence de logo a ouvert cette enquête. Se fier au drapeau de la
+    /// liste nue, c'est précharger un favori sur cinq.
     static func primeFavoriteStationArtwork() async {
+        guard await StationPriming.shared.begin() else { return }
+        defer { Task { await StationPriming.shared.end() } }
+
         let defaults = UserDefaults(suiteName: appGroupID)
         let primedAt = defaults?.object(forKey: stationPrimeAtKey) as? Double ?? 0
         guard Date().timeIntervalSince1970 - primedAt >= stationPrimeInterval else { return }
-        // Posé **avant** l'aller-retour : `startPump` part de deux endroits qui
-        // se suivent de près au lancement à froid, et sans ça la liste serait
-        // demandée deux fois.
-        defaults?.set(Date().timeIntervalSince1970, forKey: stationPrimeAtKey)
 
-        guard let data = try? await get(path: "/api/radio/stations", timeout: artworkTimeout),
+        guard let data = try? await get(path: "/api/radio/stations?favorites_only=true",
+                                        timeout: artworkTimeout),
               let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let stations = payload["stations"] as? [[String: Any]]
         else {
             // Milō injoignable au moment où l'app passe devant, ce qui est
-            // banal : rendre le créneau plutôt que de s'interdire dix minutes
-            // de préchargement pour un échec qui n'a rien appris.
-            if primedAt > 0 {
-                defaults?.set(primedAt, forKey: stationPrimeAtKey)
-            } else {
-                defaults?.removeObject(forKey: stationPrimeAtKey)
-            }
+            // banal : ne rien inscrire, pour ne pas s'interdire dix minutes de
+            // préchargement sur un échec qui n'a rien appris. Le verrou
+            // ci-dessus suffit à empêcher les deux départs de `startPump` de se
+            // marcher dessus, et il ne survit pas au processus — ce qui est
+            // exactement la portée qu'on veut.
             return
         }
+
+        // Inscrit après coup : c'est la réussite qui ouvre le créneau, pas la
+        // tentative.
+        defaults?.set(Date().timeIntervalSince1970, forKey: stationPrimeAtKey)
 
         for favicon in stationArtworkToPrime(in: stations) {
             await cacheArtwork(from: favicon)
         }
     }
 
+    /// Empêche deux préchargements simultanés.
+    ///
+    /// Le créneau de dix minutes ne suffisait pas : le lire puis l'écrire n'est
+    /// pas atomique, et `startPump` part de `didFinishLaunching` **et** de
+    /// `sceneDidBecomeActive`, qui se suivent de quelques millisecondes au
+    /// lancement à froid. Les deux passaient la garde avant que l'une ait écrit.
+    private actor StationPriming {
+        static let shared = StationPriming()
+        private var inFlight = false
+
+        func begin() -> Bool {
+            guard !inFlight else { return false }
+            inFlight = true
+            return true
+        }
+
+        func end() { inFlight = false }
+    }
+
     /// Les logos qui valent d'être déposés d'avance, parmi ce que Milō annonce.
     ///
     /// Extraite pour être testable sans réseau — c'est la seule partie du
-    /// préchargement qui porte une décision. Deux filtres, chacun pour sa
-    /// raison : **favori**, parce que ce sont les seules stations entre
-    /// lesquelles on bascule ; **hébergé par Milō**, parce qu'un logo servi par
-    /// Internet n'a jamais eu besoin du LAN et n'a donc rien à gagner ici.
+    /// préchargement qui porte une décision.
     ///
-    /// Dédupliqués : deux favoris peuvent partager un logo, et `cacheArtwork`
-    /// paierait deux fois la lecture d'en-tête pour rien.
+    /// Le tri « favori » appartient à l'appelant, qui interroge une route déjà
+    /// restreinte. On ne le refait **pas** ici sur `is_favorite` : ce drapeau
+    /// est celui de la vue de parcours, et s'y fier a déjà coûté dix-sept
+    /// favoris sur vingt-deux.
+    ///
+    /// Ce qui est filtré ici : **hébergé par Milō**, parce qu'un logo servi par
+    /// Internet n'a jamais eu besoin du LAN et n'a donc rien à gagner à être
+    /// déposé. Et dédupliqué, parce que deux stations peuvent partager un logo.
+    ///
+    /// `primeLimit` est un garde-fou, pas une règle de gestion : il borne ce
+    /// qu'une route mal restreinte pourrait faire télécharger. Vingt-deux
+    /// favoris mesurés le 20/09/2026, contre trois cents stations au catalogue —
+    /// la différence entre les deux est précisément ce qu'on ne veut pas payer.
     static func stationArtworkToPrime(in stations: [[String: Any]]) -> [String] {
         var wanted: [String] = []
-        for station in stations where station["is_favorite"] as? Bool == true {
+        for station in stations {
             guard let favicon = station["favicon"] as? String,
                   favicon.hasPrefix("/"), !wanted.contains(favicon) else { continue }
             wanted.append(favicon)
+            if wanted.count == primeLimit { break }
         }
         return wanted
     }
+
+    /// Plafond de sécurité du préchargement — voir `stationArtworkToPrime`.
+    private static let primeLimit = 40
 
     /// Quand les logos des favoris ont été déposés pour la dernière fois.
     ///

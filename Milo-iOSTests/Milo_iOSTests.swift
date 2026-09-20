@@ -131,17 +131,22 @@ struct AddressSelectionTests {
 /// Ce qu'on répare : on change de station depuis la carte de l'écran verrouillé,
 /// l'app dort, et le nouveau logo n'est dans aucun cache. Déposer les favoris
 /// pendant que l'app est devant évite à l'extension de jouer son tirage `milo.local`.
+///
+/// Le tri « favori » n'est **pas** testé ici : il appartient à la route
+/// `?favorites_only=true`. Se fier au drapeau `is_favorite` de la liste nue a
+/// coûté dix-sept favoris sur vingt-deux, et c'est exactement ce que ces tests
+/// ne doivent pas réinstaller.
 struct StationPrimingTests {
 
-    func station(_ name: String, favicon: Any?, favorite: Bool) -> [String: Any] {
-        var s: [String: Any] = ["name": name, "is_favorite": favorite]
+    func station(_ name: String, favicon: Any?) -> [String: Any] {
+        var s: [String: Any] = ["name": name]
         if let favicon { s["favicon"] = favicon }
         return s
     }
 
-    @Test("Un favori dont Milō héberge le logo est déposé")
-    func hostedFavoriteIsPrimed() {
-        let stations = [station("FIP", favicon: "/api/radio/images/d77a8b35a9a3.webp", favorite: true)]
+    @Test("Un logo hébergé par Milō est déposé")
+    func hostedFaviconIsPrimed() {
+        let stations = [station("FIP", favicon: "/api/radio/images/d77a8b35a9a3.webp")]
 
         #expect(MiloAPIClient.stationArtworkToPrime(in: stations)
                 == ["/api/radio/images/d77a8b35a9a3.webp"])
@@ -151,35 +156,36 @@ struct StationPrimingTests {
     func remoteFaviconIsSkipped() {
         // L'extension atteint `duckduckgo.com` sans toucher au LAN : rien à
         // tirer au sort, donc rien à déposer d'avance.
-        let stations = [station("RTL", favicon: "https://duckduckgo.com/i/035a5e15.png", favorite: true)]
+        let stations = [station("RTL", favicon: "https://duckduckgo.com/i/035a5e15.png")]
 
         #expect(MiloAPIClient.stationArtworkToPrime(in: stations).isEmpty)
     }
 
-    @Test("Les trois cents stations non favorites restent dehors")
-    func nonFavoritesAreSkipped() {
-        let stations = [station("Une parmi 300", favicon: "/api/radio/images/abc.webp", favorite: false)]
-
-        #expect(MiloAPIClient.stationArtworkToPrime(in: stations).isEmpty)
-    }
-
-    @Test("Un favori sans logo ne fait pas trébucher la liste")
+    @Test("Une station sans logo ne fait pas trébucher la liste")
     func missingFaviconIsIgnored() {
         let stations = [
-            station("Sans logo", favicon: nil, favorite: true),
-            station("FIP", favicon: "/api/radio/images/d77a8b35a9a3.webp", favorite: true),
+            station("Sans logo", favicon: nil),
+            station("FIP", favicon: "/api/radio/images/d77a8b35a9a3.webp"),
         ]
 
         #expect(MiloAPIClient.stationArtworkToPrime(in: stations)
                 == ["/api/radio/images/d77a8b35a9a3.webp"])
     }
 
-    @Test("Deux favoris qui partagent un logo ne le déposent qu'une fois")
+    @Test("Deux stations qui partagent un logo ne le déposent qu'une fois")
     func duplicatesAreCollapsed() {
         let shared = "/api/radio/images/3dffdd56c66f.webp"
-        let stations = [station("A", favicon: shared, favorite: true),
-                        station("B", favicon: shared, favorite: true)]
+        let stations = [station("A", favicon: shared), station("B", favicon: shared)]
 
         #expect(MiloAPIClient.stationArtworkToPrime(in: stations) == [shared])
+    }
+
+    @Test("Une route mal restreinte ne fait pas télécharger tout le catalogue")
+    func theCatalogueIsCapped() {
+        // Vingt-deux favoris mesurés, trois cents stations au catalogue. Le
+        // plafond est là pour que la différence ne se paie jamais.
+        let stations = (0..<300).map { station("S\($0)", favicon: "/api/radio/images/\($0).webp") }
+
+        #expect(MiloAPIClient.stationArtworkToPrime(in: stations).count == 40)
     }
 }
