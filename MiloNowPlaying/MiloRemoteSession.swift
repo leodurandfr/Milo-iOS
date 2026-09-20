@@ -199,8 +199,6 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                     cache servi brut : \(data.count, privacy: .public) o \
                     format \(Self.formatTag(data), privacy: .public)
                     """)
-                UserDefaults(suiteName: MiloAPIClient.appGroupID)?
-                    .set("cache brut \(data.count)o", forKey: "milo_artwork_trace")
                 return try ArtworkRepresentation(data: data)
             }
             miloLog.info("cache absent ou vide, repli sur le réseau")
@@ -248,8 +246,6 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                 format \(Self.formatTag(data), privacy: .public) \
                 depuis \(url.absoluteString, privacy: .public)
                 """)
-            UserDefaults(suiteName: MiloAPIClient.appGroupID)?
-                .set("réseau HTTP \(code) \(data.count)o", forKey: "milo_artwork_trace")
 
             // Déposé pour la fois d'après, ici et pas ailleurs : c'est le seul
             // endroit de l'extension que le système attend, donc le seul où une
@@ -293,8 +289,6 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                     format \(Self.formatTag(data), privacy: .public) \
                     depuis \(url.absoluteString, privacy: .public)
                     """)
-                UserDefaults(suiteName: MiloAPIClient.appGroupID)?
-                    .set("inaffichable \(Self.formatTag(data))", forKey: "milo_artwork_trace")
                 // Jeter plutôt que rendre ces octets : le système retiendrait
                 // sinon une image vide sous cet identifiant et ne redemanderait
                 // plus rien — `Artwork` est `Identifiable` et c'est bien son
@@ -395,80 +389,7 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// bien une écriture **absolue** : convertir en delta contre
     /// `/api/volume/adjust` serait une lecture-modification-écriture en course
     /// contre l'encodeur rotatif de l'appareil.
-    /// Sonde unique : « rien ne marche » ne distingue pas une extension sans
-    /// réseau du tout d'une extension à qui seul le LAN est refusé, et les deux
-    /// appellent des corrections opposées.
-    ///
-    /// Un appel explicite plutôt qu'un `static let` paresseux : de type `Void` et
-    /// avec son résultat jeté, celui-ci pouvait être éliminé à la compilation —
-    /// il ne s'est jamais exécuté.
-    nonisolated(unsafe) private static var probed = false
-
-    nonisolated private static func runProbeOnce() {
-        guard !probed else { return }
-        probed = true
-        Task {
-            // L'IP est lue dans l'app group, jamais obtenue de `baseURL()` :
-            // cette extension pose `prefersHostname = true` dans son `init`, si
-            // bien que `baseURL()` rend `milo.local`. Les deux jambes
-            // interrogeaient donc la même adresse et rendaient toujours deux
-            // valeurs égales — `ip=KO(-1001) mdns=KO(-1001)`, puis `ip=200
-            // mdns=200`. La sonde n'existe que pour les distinguer, et elle ne
-            // distinguait rien.
-            let ipHost = UserDefaults(suiteName: MiloAPIClient.appGroupID)?
-                .string(forKey: MiloAPIClient.ipAddressKey) ?? ""
-
-            let ipURL = ipHost.isEmpty ? "" : "http://\(ipHost)/api/volume/state"
-
-            async let net = probeResult("https://www.apple.com")
-            async let mdns = probeResult("http://milo.local/api/volume/state")
-
-            // L'IP est sondée **deux fois**, et c'est toute la question du jour.
-            //
-            // Le journal système du 19/09/2026 montre que le chemin IPv4 *non
-            // scopé* est refusé — `Path was denied by NECP policy` — tandis que
-            // le chemin IPv4 *scopé sur en0*, essayé quelques millisecondes plus
-            // tard par le même `URLSession`, passe et sert la réponse. C'est
-            // pour ça que `milo.local` marche et que l'IP directe rend -1009 :
-            // un nom produit plusieurs candidats et l'un d'eux tombe après
-            // l'autorisation, une IP n'en produit qu'un.
-            //
-            // Si le second essai répond, l'IP redevient utilisable et `milo.local`
-            // quitte le chemin critique — avec lui, la résolution mDNS qui
-            // consomme parfois les trois secondes du budget d'une commande.
-            // Les deux essais sont séquentiels — c'est tout leur objet — mais
-            // courts : un refus NECP revient en quelques millisecondes, et le
-            // délai ne joue que si Milō est injoignable. Les allonger ferait
-            // dépasser à cette tâche la durée de vie de son propre processus, et
-            // l'écriture ci-dessous n'atterrirait jamais — surtout pas dans le
-            // cas « LAN injoignable » que la sonde existe pour décrire.
-            let ipFirst = await probeResult(ipURL, timeout: 2)
-            let ipSecond = await probeResult(ipURL, timeout: 2)
-
-            // Clé dédiée, pas le journal : celui-ci est un tableau réécrit en
-            // lecture-modification-écriture par des appelants concurrents, assez
-            // sollicité pour en chasser la sonde avant qu'on la lise.
-            UserDefaults(suiteName: MiloAPIClient.appGroupID)?.set(
-                "internet=\(await net) ip=\(ipFirst) ip2=\(ipSecond) mdns=\(await mdns)",
-                forKey: "milo_ext_probe")
-        }
-    }
-
-    nonisolated private static func probeResult(_ raw: String,
-                                                 timeout: TimeInterval = 5) async -> String {
-        guard !raw.isEmpty else { return "aucune IP connue" }
-        guard let url = URL(string: raw) else { return "url?" }
-        var r = URLRequest(url: url); r.timeoutInterval = timeout
-        do {
-            let (_, response) = try await URLSession.shared.data(for: r)
-            return "\((response as? HTTPURLResponse)?.statusCode ?? -1)"
-        } catch {
-            return "KO(\((error as NSError).code))"
-        }
-    }
-
     var devices: [MediaDevice] {
-        Self.runProbeOnce()
         miloLog.info("devices lu : \(self.attributes.devices.count, privacy: .public) enceinte(s)")
 
         let shown = attributes.devices.map { (device: $0, level: Self.displayedVolume($0)) }
