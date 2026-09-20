@@ -122,6 +122,159 @@ struct MiloAPIClient {
         return "http://milo.local"
     }
 
+    // MARK: - Résolution de l'adresse
+
+    /// L'adresse de Milō ne bouge qu'au renouvellement du bail DHCP : inutile de
+    /// relancer une résolution à chaque sondage.
+    static let ipResolutionInterval: TimeInterval = 300
+
+    /// Ce qu'on accorde à un candidat pour prouver qu'il est bien Milō. Court
+    /// délibérément : une adresse morte doit coûter moins qu'un sondage, et
+    /// `.local` en produit rarement plus de deux.
+    private static let candidateProbeTimeout: TimeInterval = 1.5
+
+    /// Résout `milo.local` et mémorise l'adresse **qui répond**, pour le widget.
+    ///
+    /// `URLSession` ne réécrit pas l'URL de la réponse avec l'adresse résolue :
+    /// `httpResponse.url?.host` vaut toujours « milo.local », si bien que la clé
+    /// partagée resterait vide et que l'extension WidgetKit referait une
+    /// résolution mDNS à chaque réveil — lente, et fragile dans son budget.
+    ///
+    /// Pourquoi on *teste* au lieu de prendre la première adresse venue : sur ce
+    /// réseau, `milo.local` a deux réponses concurrentes. Le mDNS multicast rend
+    /// l'adresse réelle du Pi ; une route Split DNS du tailnet envoie `.local`
+    /// au NAS, qui sert une entrée statique périmée. La course se rejoue à
+    /// chaque résolution, et `getaddrinfo` rend les deux, dans un ordre qui n'est
+    /// pas le nôtre. Prendre la première et l'épingler cinq minutes, c'est offrir
+    /// à l'app une panne totale un tirage sur deux — symptôme qui se lit comme
+    /// une dizaine de bugs distincts : volume qui s'applique parfois, commandes
+    /// muettes, « Milo n'est pas disponible » qui se répare tout seul.
+    ///
+    /// Ça ne remplace pas de rendre `.local` au mDNS côté réseau ; ça empêche
+    /// seulement l'app d'être la victime de ce qu'elle ne contrôle pas.
+    static func resolveAndCacheIPAddress() async {
+        guard let defaults = UserDefaults(suiteName: appGroupID) else { return }
+
+        let hasCachedIP = defaults.string(forKey: ipAddressKey)?.isEmpty == false
+        let resolvedAt = defaults.object(forKey: ipResolvedAtKey) as? Double ?? 0
+        if hasCachedIP, Date().timeIntervalSince1970 - resolvedAt < ipResolutionInterval { return }
+
+        // Hors du pool coopératif : `getaddrinfo` bloque le temps de la
+        // résolution, et sur ce réseau la branche unicast peut consommer ses
+        // trois secondes entières. Un `await` qui retient un thread du pool en
+        // affame le reste de l'app.
+        let candidates = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: resolveIPv4Candidates(for: "milo.local"))
+            }
+        }
+        guard !candidates.isEmpty else { return }
+
+        guard let ip = await firstReachable(among: candidates, probe: { await respondsAsMilo($0) })
+        else {
+            // Aucun candidat ne répond : **retirer** l'ancienne plutôt que la
+            // laisser en place. `baseURL()` retombe alors sur `milo.local`, ce
+            // qui donne au moins une chance au tirage suivant, là où une adresse
+            // morte en cache condamne toutes les requêtes jusqu'à expiration.
+            defaults.removeObject(forKey: ipAddressKey)
+            defaults.removeObject(forKey: ipResolvedAtKey)
+            return
+        }
+
+        defaults.set(ip, forKey: ipAddressKey)
+        defaults.set(Date().timeIntervalSince1970, forKey: ipResolvedAtKey)
+    }
+
+    /// Le premier candidat que `probe` accepte, dans l'ordre donné.
+    ///
+    /// Séquentiel et non concurrent : c'est tout l'objet de l'ordre. `getaddrinfo`
+    /// place en tête ce que le système juge préférable, et on ne s'en écarte que
+    /// si ça ne répond pas.
+    ///
+    /// Extraite pour être testable sans réseau — c'est la seule partie de la
+    /// résolution qui porte une décision.
+    static func firstReachable(among candidates: [String],
+                               probe: (String) async -> Bool) async -> String? {
+        for candidate in candidates where await probe(candidate) { return candidate }
+        return nil
+    }
+
+    /// Toutes les adresses IPv4 que le système associe à ce nom, dédupliquées,
+    /// dans l'ordre où il les rend.
+    ///
+    /// La liste **entière**, et pas seulement `info.pointee` : les deux réponses
+    /// concurrentes de `milo.local` y sont côte à côte, et n'en lire qu'une
+    /// revenait à tirer au sort.
+    ///
+    /// Bloquant : `getaddrinfo` attend la résolution.
+    private static func resolveIPv4Candidates(for host: String) -> [String] {
+        var hints = addrinfo()
+        hints.ai_family = AF_INET
+        hints.ai_socktype = SOCK_STREAM
+
+        var info: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &info) == 0 else { return [] }
+        defer { freeaddrinfo(info) }
+
+        var found: [String] = []
+        var node = info
+        while let current = node {
+            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(current.pointee.ai_addr,
+                           current.pointee.ai_addrlen,
+                           &buffer, socklen_t(buffer.count),
+                           nil, 0, NI_NUMERICHOST) == 0 {
+                let ip = String(cString: buffer)
+                if !ip.isEmpty, !found.contains(ip) { found.append(ip) }
+            }
+            node = current.pointee.ai_next
+        }
+        return found
+    }
+
+    /// Cette adresse sert-elle bien l'API de Milō ?
+    ///
+    /// `/api/volume/state` plutôt que la racine : nginx sert la SPA sur `/`, et
+    /// n'importe quel serveur web du LAN répondrait 200 à un `HEAD /`. On demande
+    /// une route que seul Milō a.
+    private static func respondsAsMilo(_ ip: String) async -> Bool {
+        guard let url = URL(string: "http://\(ip)/api/volume/state") else { return false }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = candidateProbeTimeout
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        guard let (_, response) = try? await lan.data(for: request) else { return false }
+        return (response as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    /// Oublier l'adresse en cache après un échec réseau, pour que le sondage
+    /// suivant re-résolve au lieu d'attendre les cinq minutes.
+    ///
+    /// Appelée sur les erreurs d'`URLSession` uniquement, jamais sur un code HTTP :
+    /// une route qui répond 400 prouve que l'adresse est la bonne.
+    ///
+    /// Pas de réessai ici : le budget d'une commande ne le permet pas — c'est
+    /// déjà la raison d'être du second essai de `sendControl`. On se contente de
+    /// ne pas rester collé à une adresse qu'on vient de voir échouer.
+    private static func forgetCachedIPAddress(after error: Error) {
+        guard !prefersHostname else { return }
+        let error = error as NSError
+        guard error.domain == NSURLErrorDomain else { return }
+        // Énumérés plutôt que « toute erreur d'URL » : `NSURLErrorCancelled`
+        // arrive à chaque navigation annulée et ne dit rien de l'adresse.
+        // `-1009` est dans la liste parce que c'est ce que rend iOS quand il
+        // refuse une IP privée, pas seulement quand le réseau manque.
+        switch error.code {
+        case NSURLErrorTimedOut, NSURLErrorCannotConnectToHost,
+             NSURLErrorCannotFindHost, NSURLErrorNetworkConnectionLost,
+             NSURLErrorNotConnectedToInternet:
+            let defaults = UserDefaults(suiteName: appGroupID)
+            defaults?.removeObject(forKey: ipAddressKey)
+            defaults?.removeObject(forKey: ipResolvedAtKey)
+        default:
+            break
+        }
+    }
+
     // MARK: - Volume
 
     static func getVolume() async throws -> MiloVolumeState {
@@ -254,8 +407,13 @@ struct MiloAPIClient {
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        let (data, _) = try await lan.data(for: request)
-        return data
+        do {
+            let (data, _) = try await lan.data(for: request)
+            return data
+        } catch {
+            forgetCachedIPAddress(after: error)
+            throw error
+        }
     }
 
     @discardableResult
@@ -269,8 +427,13 @@ struct MiloAPIClient {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, _) = try await lan.data(for: request)
-        return data
+        do {
+            let (data, _) = try await lan.data(for: request)
+            return data
+        } catch {
+            forgetCachedIPAddress(after: error)
+            throw error
+        }
     }
 
 }

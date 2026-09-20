@@ -38,10 +38,6 @@ class ViewController: UIViewController, WKNavigationDelegate {
     /// retéléchargerait une vingtaine de sous-ressources pour rien.
     private let reloadAfterBackgroundInterval: TimeInterval = 30
 
-    /// L'adresse de Milō ne bouge qu'au renouvellement du bail DHCP : inutile de
-    /// relancer une résolution à chaque sondage.
-    private static let ipResolutionInterval: TimeInterval = 300
-
     override func loadView() {
         let containerView = UIView()
         containerView.backgroundColor = UIColor(red: 0.97, green: 0.97, blue: 0.97, alpha: 1.0)
@@ -236,8 +232,11 @@ class ViewController: UIViewController, WKNavigationDelegate {
         URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
             let isAvailable = error == nil && (response as? HTTPURLResponse)?.statusCode == 200
 
-            // Hors du thread principal : `getaddrinfo` bloque le temps de la résolution.
-            if isAvailable { Self.cacheResolvedIPAddress() }
+            // `Task` : la résolution teste maintenant chaque candidat sur le
+            // réseau avant de le retenir, ce qui la rend asynchrone. Détachée du
+            // sondage à dessein — l'affichage ci-dessous ne l'attend pas, et
+            // c'est déjà ce que faisait l'appel bloquant qu'elle remplace.
+            if isAvailable { Task { await MiloAPIClient.resolveAndCacheIPAddress() } }
 
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -256,42 +255,6 @@ class ViewController: UIViewController, WKNavigationDelegate {
         }.resume()
     }
     
-    /// Résout `milo.local` et mémorise l'adresse pour le widget.
-    ///
-    /// `URLSession` ne réécrit pas l'URL de la réponse avec l'adresse résolue :
-    /// `httpResponse.url?.host` valait toujours « milo.local », si bien que la clé
-    /// partagée restait vide et que l'extension WidgetKit refaisait une résolution
-    /// mDNS à chaque réveil — lente, et fragile dans son budget d'exécution.
-    ///
-    /// Bloquant : à n'appeler que hors du thread principal.
-    private static func cacheResolvedIPAddress() {
-        guard let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID) else { return }
-
-        let hasCachedIP = defaults.string(forKey: MiloAPIClient.ipAddressKey)?.isEmpty == false
-        let resolvedAt = defaults.object(forKey: MiloAPIClient.ipResolvedAtKey) as? Double ?? 0
-        if hasCachedIP, Date().timeIntervalSince1970 - resolvedAt < ipResolutionInterval { return }
-
-        var hints = addrinfo()
-        hints.ai_family = AF_INET
-        hints.ai_socktype = SOCK_STREAM
-
-        var info: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo("milo.local", nil, &hints, &info) == 0, let first = info else { return }
-        defer { freeaddrinfo(info) }
-
-        var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        guard getnameinfo(first.pointee.ai_addr,
-                          first.pointee.ai_addrlen,
-                          &buffer, socklen_t(buffer.count),
-                          nil, 0, NI_NUMERICHOST) == 0 else { return }
-
-        let ip = String(cString: buffer)
-        guard !ip.isEmpty else { return }
-
-        defaults.set(ip, forKey: MiloAPIClient.ipAddressKey)
-        defaults.set(Date().timeIntervalSince1970, forKey: MiloAPIClient.ipResolvedAtKey)
-    }
-
     func showErrorView() {
         // Afficher la vue d'erreur avec animation
         UIView.animate(withDuration: 0.3) {

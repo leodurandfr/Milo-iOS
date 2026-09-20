@@ -66,3 +66,62 @@ struct VolumeGestureTests {
         #expect(!MiloAPIClient.isGlobalGesture(ratios: [1.9], touched: 1, deviceCount: 1))
     }
 }
+
+/// Le choix de l'adresse de Milō parmi les réponses concurrentes de `milo.local`.
+///
+/// Sur ce réseau le nom en a deux : celle du mDNS, juste, et celle qu'une route
+/// Split DNS fait servir par le NAS, périmée. `getaddrinfo` rend les deux et
+/// l'ordre n'est pas le nôtre — prendre la première et l'épingler cinq minutes
+/// mettait l'app en panne totale un tirage sur deux.
+struct AddressSelectionTests {
+
+    @Test("Le premier candidat qui répond est retenu")
+    func firstResponderWins() async {
+        let picked = await MiloAPIClient.firstReachable(among: ["192.168.1.39", "192.168.1.55"]) {
+            $0 == "192.168.1.39"
+        }
+
+        #expect(picked == "192.168.1.39")
+    }
+
+    @Test("Un premier candidat muet ne condamne pas les suivants")
+    func deadFirstCandidateIsSkipped() async {
+        let picked = await MiloAPIClient.firstReachable(among: ["192.168.1.55", "192.168.1.39"]) {
+            $0 == "192.168.1.39"
+        }
+
+        #expect(picked == "192.168.1.39")
+    }
+
+    @Test("On s'arrête au premier qui répond, sans sonder le reste")
+    func probingStopsAtTheFirstHit() async {
+        let probed = Probed()
+
+        _ = await MiloAPIClient.firstReachable(among: ["a", "b", "c"]) {
+            await probed.record($0)
+            return $0 == "a"
+        }
+
+        #expect(await probed.all == ["a"])
+    }
+
+    @Test("Aucun candidat ne répond : rien à retenir")
+    func nothingReachableYieldsNil() async {
+        let picked = await MiloAPIClient.firstReachable(among: ["192.168.1.55"]) { _ in false }
+
+        #expect(picked == nil)
+    }
+
+    @Test("Sans candidat, rien à choisir")
+    func emptyYieldsNil() async {
+        let picked = await MiloAPIClient.firstReachable(among: []) { _ in true }
+
+        #expect(picked == nil)
+    }
+
+    /// Ce que la sonde a vu passer, dans l'ordre.
+    private actor Probed {
+        private(set) var all: [String] = []
+        func record(_ candidate: String) { all.append(candidate) }
+    }
+}
