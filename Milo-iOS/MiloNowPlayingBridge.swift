@@ -136,6 +136,11 @@ enum MiloNowPlayingBridge {
                 try? await Task.sleep(for: .seconds(2))
             }
         }
+
+        // À côté de la boucle, pas dedans : c'est un dépôt d'avance pour
+        // l'extension, dont rien n'attend le résultat. Il se borne lui-même à un
+        // passage toutes les dix minutes.
+        Task { await MiloAPIClient.primeFavoriteStationArtwork() }
     }
 
     static func stopPump() {

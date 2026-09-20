@@ -227,25 +227,7 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             var request = URLRequest(url: url)
             request.setValue("image/jpeg", forHTTPHeaderField: "Accept")
 
-            let data: Data
-            let response: URLResponse
-            do {
-                (data, response) = try await URLSession.shared.data(for: request)
-            } catch {
-                miloLog.error("""
-                    réseau : échec \(url.lastPathComponent, privacy: .public) — \
-                    \((error as NSError).code, privacy: .public) \
-                    \(error.localizedDescription, privacy: .public)
-                    """)
-                throw error
-            }
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            miloLog.info("""
-                réseau servi : HTTP \(code, privacy: .public), \
-                \(data.count, privacy: .public) o \
-                format \(Self.formatTag(data), privacy: .public) \
-                depuis \(url.absoluteString, privacy: .public)
-                """)
+            let (data, code) = try await Self.downloadArtwork(request, from: url)
 
             // Déposé pour la fois d'après, ici et pas ailleurs : c'est le seul
             // endroit de l'extension que le système attend, donc le seul où une
@@ -308,6 +290,72 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             }
             return try ArtworkRepresentation(data: data)
         }
+    }
+
+    /// Ce qu'on accorde à un essai de téléchargement de pochette.
+    ///
+    /// Deux essais tiennent dans les dix secondes au-delà desquelles le système
+    /// abandonne (`playbackQueueRequest timed out after 10s`, puis `Catalog
+    /// returned nil image`), avec de la marge. Et c'est large pour ce qu'on
+    /// demande : une pochette de 525 ko est arrivée en 64 ms le 19/09/2026.
+    private static let artworkAttemptTimeout: TimeInterval = 2.5
+
+    /// Le téléchargement lui-même, en deux essais courts plutôt qu'un sans
+    /// borne.
+    ///
+    /// Sans `timeoutInterval`, cette requête héritait des **soixante secondes**
+    /// par défaut d'`URLSession` — dans un rappel dont le système n'attend pas
+    /// tant, et depuis un processus que `mediaremoted` peut terminer entre
+    /// temps. Une résolution qui traîne n'y était donc pas un échec qu'on
+    /// rattrape : c'était une image qui n'arrivait jamais, sans que rien ne le
+    /// dise.
+    ///
+    /// Le second essai vise la même chose que celui de `sendControl` : l'échec
+    /// mesuré n'est pas un refus, c'est une connexion qui n'aboutit jamais —
+    /// zéro chemin `ready` à 19:39:21, un chemin qui passe à 19:40:35 sans rien
+    /// changer d'autre. Un second tirage est exactement ce qui peut le sauver,
+    /// et il compte double ici : le fournisseur est épinglé sur `milo.local`,
+    /// dont la résolution est elle-même un tirage sur ce réseau.
+    ///
+    /// Une **réponse** n'est jamais rejouée, quel que soit son code : un 404 est
+    /// une réponse, et le répéter ne ferait que le répéter plus lentement. Seule
+    /// une requête qui jette a droit au second essai.
+    private static func downloadArtwork(_ request: URLRequest,
+                                        from url: URL) async throws -> (Data, Int) {
+        let attempts = 2
+        var request = request
+        request.timeoutInterval = artworkAttemptTimeout
+
+        for attempt in 1...attempts {
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                miloLog.info("""
+                    réseau servi : HTTP \(code, privacy: .public), \
+                    \(data.count, privacy: .public) o \
+                    format \(Self.formatTag(data), privacy: .public) \
+                    depuis \(url.absoluteString, privacy: .public)\
+                    \(attempt == 1 ? "" : " (2e essai)", privacy: .public)
+                    """)
+                return (data, code)
+            } catch {
+                // Tracé à chaque essai, pas seulement au dernier : « ça a marché
+                // au second » et « ça a marché du premier coup » appellent des
+                // lectures différentes du réseau.
+                miloLog.error("""
+                    réseau : échec \(url.lastPathComponent, privacy: .public) — \
+                    \((error as NSError).code, privacy: .public) \
+                    \(error.localizedDescription, privacy: .public) \
+                    (essai \(attempt, privacy: .public)/\(attempts, privacy: .public))
+                    """)
+                if attempt == attempts { throw error }
+                // Rien à attendre avant de retenter : la boucle rouvre une
+                // connexion, et c'est le nouveau tirage qu'on veut.
+            }
+        }
+
+        // Inatteignable : la dernière itération rend ou jette.
+        throw ArtworkRepresentation.ArtworkRepresentationError.noRepresentationAvailable
     }
 
     // MARK: - Commandes

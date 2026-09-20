@@ -723,6 +723,83 @@ extension MiloAPIClient {
         }
     }
 
+    /// Dépose d'avance les logos des stations favorites.
+    ///
+    /// Ce que ça répare : on change de station depuis la carte de l'écran
+    /// verrouillé, l'app dort, et le nouveau logo n'est dans aucun cache. Il ne
+    /// reste alors que le repli réseau de l'extension — épinglé sur
+    /// `milo.local`, dans un processus que `mediaremoted` peut terminer, et
+    /// c'est exactement le tirage qu'on cherche à ne plus jouer. Les favoris
+    /// sont les seules stations entre lesquelles on bascule, et il y en a cinq
+    /// pour trois cents stations : les déposer coûte cinq fichiers.
+    ///
+    /// **Seuls les logos hébergés par Milō** sont concernés — ceux qui commencent
+    /// par `/`. Les autres sont des URL publiques que l'extension atteint par
+    /// Internet sans toucher au LAN, donc sans rien tirer au sort ; les
+    /// précharger ne réparerait rien et remplirait le cache pour rien.
+    ///
+    /// Appelée au passage au premier plan, pas dans la boucle : la liste des
+    /// stations pèse une centaine de kilooctets, ce qui n'a rien à faire dans un
+    /// sondage de deux secondes. `cacheArtwork` juge ensuite sur les octets
+    /// d'en-tête et sort aussitôt pour ce qui est déjà là.
+    static func primeFavoriteStationArtwork() async {
+        let defaults = UserDefaults(suiteName: appGroupID)
+        let primedAt = defaults?.object(forKey: stationPrimeAtKey) as? Double ?? 0
+        guard Date().timeIntervalSince1970 - primedAt >= stationPrimeInterval else { return }
+        // Posé **avant** l'aller-retour : `startPump` part de deux endroits qui
+        // se suivent de près au lancement à froid, et sans ça la liste serait
+        // demandée deux fois.
+        defaults?.set(Date().timeIntervalSince1970, forKey: stationPrimeAtKey)
+
+        guard let data = try? await get(path: "/api/radio/stations", timeout: artworkTimeout),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let stations = payload["stations"] as? [[String: Any]]
+        else {
+            // Milō injoignable au moment où l'app passe devant, ce qui est
+            // banal : rendre le créneau plutôt que de s'interdire dix minutes
+            // de préchargement pour un échec qui n'a rien appris.
+            if primedAt > 0 {
+                defaults?.set(primedAt, forKey: stationPrimeAtKey)
+            } else {
+                defaults?.removeObject(forKey: stationPrimeAtKey)
+            }
+            return
+        }
+
+        for favicon in stationArtworkToPrime(in: stations) {
+            await cacheArtwork(from: favicon)
+        }
+    }
+
+    /// Les logos qui valent d'être déposés d'avance, parmi ce que Milō annonce.
+    ///
+    /// Extraite pour être testable sans réseau — c'est la seule partie du
+    /// préchargement qui porte une décision. Deux filtres, chacun pour sa
+    /// raison : **favori**, parce que ce sont les seules stations entre
+    /// lesquelles on bascule ; **hébergé par Milō**, parce qu'un logo servi par
+    /// Internet n'a jamais eu besoin du LAN et n'a donc rien à gagner ici.
+    ///
+    /// Dédupliqués : deux favoris peuvent partager un logo, et `cacheArtwork`
+    /// paierait deux fois la lecture d'en-tête pour rien.
+    static func stationArtworkToPrime(in stations: [[String: Any]]) -> [String] {
+        var wanted: [String] = []
+        for station in stations where station["is_favorite"] as? Bool == true {
+            guard let favicon = station["favicon"] as? String,
+                  favicon.hasPrefix("/"), !wanted.contains(favicon) else { continue }
+            wanted.append(favicon)
+        }
+        return wanted
+    }
+
+    /// Quand les logos des favoris ont été déposés pour la dernière fois.
+    ///
+    /// Une station qu'on ajoute aux favoris n'apparaît donc qu'au prochain
+    /// créneau. C'est assumé : le repli réseau de l'extension la couvre entre
+    /// temps, et refaire la liste à chaque passage au premier plan coûterait
+    /// cent kilooctets par aller-retour d'app.
+    private static let stationPrimeAtKey = "milo_station_prime_at"
+    private static let stationPrimeInterval: TimeInterval = 600
+
     /// Ce qu'on accorde au CDN des pochettes avant de rendre la main au
     /// sondage, et le répit qu'on s'accorde après un échec.
     private static let artworkTimeout: TimeInterval = 6
