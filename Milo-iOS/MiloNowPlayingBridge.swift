@@ -58,12 +58,23 @@ enum MiloCardVisibility {
         let sourceState = audio["source_state"] as? String ?? ""
         let named = namesSomething(metadata)
 
+        // Il y avait ici une troisième clause — « métadonnée vide **et** rien
+        // qui joue » — censée protéger un trou de métadonnées sous une source
+        // qui joue. Elle ne protégeait rien : `is_playing` se lit dans la
+        // métadonnée que la première moitié exige vide, donc la seconde était
+        // vraie chaque fois qu'elle était évaluée. Écrite ainsi depuis 8c8feef,
+        // jamais tombée parce qu'aucun test ne couvrait une source active sans
+        // métadonnée — c'est ce que fige maintenant
+        // `anActiveSourceWithoutMetadataHoldsItsCard`.
+        //
+        // Retirée plutôt que réparée, et il n'y a rien à réparer : quand la
+        // métadonnée est vide, elle ne peut pas dire si ça joue, et le seul
+        // témoin qui reste est `source_state`. « Pas active et ne nomme rien »
+        // le dit déjà, juste au-dessus. Une source active garde donc sa carte
+        // quoi que dise sa métadonnée, ce qui est la règle annoncée et celle
+        // que `_has_active_source` applique de l'autre côté.
         guard source.isEmpty || source == "none"
                 || (sourceState != "active" && !named)
-                // Un trou de métadonnées sous une source qui joue ne doit pas
-                // fermer la session ; sous une source qui ne joue pas, si.
-                || ((metadata?.isEmpty ?? true)
-                    && !(metadata?["is_playing"] as? Bool ?? false))
         else { return nil }
 
         // Le verdict a deux moitiés, et une trace qui n'en porte qu'une ne dit

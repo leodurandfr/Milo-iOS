@@ -466,16 +466,26 @@ struct NowPlayingVisibilityTests {
         ]) != nil)
     }
 
-    @Test("Une métadonnée vide sous une source qui ne joue pas ferme la carte")
-    func anEmptyMetadataUnderASilentSourceClosesTheCard() {
-        // La garde mesurée en 8c8feef, conservée : active, mais rien dedans et
-        // rien qui sort.
+    @Test("Une source active sans aucune clé métadonnée garde sa carte")
+    func anActiveSourceWithAbsentMetadataHoldsItsCard() {
+        // Le cas que personne ne couvrait, et qui rendait la troisième clause
+        // de la garde ineffective sans que rien ne le dise : pas de clé
+        // `metadata` du tout, sous une source active. La fermer là coupait la
+        // carte en pleine lecture, et `openSession` ne pouvait pas la rouvrir
+        // — `attributes.isPlaying` se lit dans la même métadonnée absente.
+        #expect(verdict([
+            "active_source": "radio",
+            "source_state": "active",
+            "transitioning": false,
+        ]) == nil)
+
+        // Et la même chose avec la clé présente mais vide.
         #expect(verdict([
             "active_source": "airplay",
             "source_state": "active",
             "transitioning": false,
             "metadata": [:],
-        ]) != nil)
+        ]) == nil)
     }
 
     @Test("La trace dit laquelle des deux moitiés a fermé la carte")
