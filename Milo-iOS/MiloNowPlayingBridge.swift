@@ -243,14 +243,20 @@ enum MiloNowPlayingBridge {
         // ouvre une rivale que le système n'affiche pas.
         await MiloAPIClient.drainPendingSessionToken()
 
-        let attributes: MiloSessionAttributes
-        switch await buildState() {
-        case .injoignable:
-            // Ne rien changer : une coupure réseau n'est pas une fin de lecture,
-            // et effacer la carte à chaque paquet perdu la ferait clignoter.
+        // Ne rien changer si Milō est injoignable : une coupure réseau n'est
+        // pas une fin de lecture, et effacer la carte à chaque paquet perdu la
+        // ferait clignoter. C'est l'opposé de « rien à montrer », juste en
+        // dessous, qui doit au contraire l'effacer — les deux se lisaient comme
+        // « pas d'attributs » et menaient au même `return`, d'où la carte figée
+        // sur la piste d'avant à chaque changement de source.
+        guard let audioData = try? await MiloAPIClient.get(path: "/api/audio/state"),
+              let audio = try? JSONSerialization.jsonObject(with: audioData) as? [String: Any]
+        else {
             note("pas d'état exploitable depuis Milō")
             return
-        case .rienÀMontrer(let seen):
+        }
+
+        if let seen = MiloCardVisibility.nothingToShow(in: audio) {
             // Réconcilier d'abord : on ferme ce que le système tient vraiment,
             // pas ce que l'app croit tenir.
             await reconcileSession()
@@ -264,9 +270,32 @@ enum MiloNowPlayingBridge {
             }
             await endSession(reason: seen)
             return
-        case .lecture(let built):
-            attributes = built
         }
+
+        // Réconcilier à **chaque** passe, et ici plutôt qu'après la
+        // construction.
+        //
+        // L'app se contentait d'adopter quand elle ne tenait rien, puis gardait
+        // sa prise pour toujours. Milō, lui, termine et rouvre des sessions
+        // selon ce qui joue : l'app restait alors accrochée à une session morte
+        // de son côté pendant que la vivante, invisible, recevait tout.
+        await reconcileSession()
+
+        // **Décider avant de payer.** Construire les attributs coûte deux
+        // requêtes de plus — `/api/volume/state` et `/api/multiroom/state`,
+        // dans `buildDevices` — plus le dépôt de la pochette. Tant qu'une
+        // source arrêtée rendait « rien à montrer », ce chemin ne s'ouvrait que
+        // pour quelque chose qui jouait ; depuis qu'elle garde sa carte, il
+        // s'ouvre aussi quand personne ne tient de session et n'en ouvrira, et
+        // ces trois requêtes toutes les deux secondes partaient alors à la
+        // poubelle — pour toute la durée où l'app reste au premier plan.
+        let isPlaying = (audio["metadata"] as? [String: Any])?["is_playing"] as? Bool ?? false
+        guard session != nil || mayOpenSession(isPlaying: isPlaying) else {
+            note("aucune session, et rien à ouvrir")
+            return
+        }
+
+        let attributes = await buildAttributes(from: audio)
 
         // Ne pousser que ce qui change l'affichage.
         //
@@ -279,18 +308,12 @@ enum MiloNowPlayingBridge {
         // en permanence, et `MediaPlaybackSnapshot` porte déjà un horodatage à
         // partir duquel le système interpole. L'annoncer à chaque seconde ne
         // dirait rien de plus et coûterait tout.
-        // `positionJumped` met à jour son propre suivi : l'appeler une fois par
-        // passe, avant toute sortie anticipée.
+        // `positionJumped` met à jour son propre suivi, et n'est donc appelé
+        // que sur les passes qui construisent vraiment des attributs. Les
+        // sorties au-dessus n'en produisent aucun : il n'y a rien à comparer,
+        // et `endSession` remet `lastElapsed` à nil de son côté.
         let jumped = positionJumped(attributes)
         let signature = displaySignature(attributes)
-
-        // Réconcilier d'abord, et à **chaque** passe.
-        //
-        // L'app se contentait d'adopter quand elle ne tenait rien, puis gardait
-        // sa prise pour toujours. Milō, lui, termine et rouvre des sessions
-        // selon ce qui joue : l'app restait alors accrochée à une session morte
-        // de son côté pendant que la vivante, invisible, recevait tout.
-        await reconcileSession()
 
         // Personne n'a ouvert ? On ouvre, si quelque chose joue.
         if session == nil {
@@ -423,10 +446,21 @@ enum MiloNowPlayingBridge {
     ///
     /// La carte en pause s'ouvre donc comme avant : pendant que ça jouait. Ce
     /// qui a changé est qu'elle ne se ferme plus à l'arrêt.
+    /// Les trois conditions d'une ouverture, lisibles avant d'avoir construit
+    /// quoi que ce soit.
+    ///
+    /// Extraites pour que `refresh()` puisse poser la question avec le seul
+    /// `is_playing` de `/api/audio/state`, sans payer les deux requêtes de
+    /// `buildDevices`. Une seule définition : deux réponses divergentes à
+    /// « va-t-on ouvrir ? » feraient soit construire pour rien, soit renoncer à
+    /// une ouverture légitime.
+    private static func mayOpenSession(isPlaying: Bool) -> Bool {
+        !systemHoldsAny && isPlaying
+            && Date().timeIntervalSince(lastStartAttempt) > startRetryDelay
+    }
+
     private static func openSession(_ attributes: MiloSessionAttributes) async {
-        guard !systemHoldsAny, attributes.isPlaying,
-              Date().timeIntervalSince(lastStartAttempt) > startRetryDelay
-        else { return }
+        guard mayOpenSession(isPlaying: attributes.isPlaying) else { return }
         lastStartAttempt = Date()
 
         do {
@@ -512,26 +546,15 @@ enum MiloNowPlayingBridge {
     /// reste figée sur la piste d'avant, en pause. Ce sont deux situations
     /// opposées : une coupure réseau ne doit **rien** changer à l'affichage, une
     /// absence de source doit l'effacer.
-    private enum MiloState {
-        case injoignable
-        /// Porte **ce que Milō a dit**, pas seulement le verdict : sans ça, une
-        /// carte qui reste affichée ne distingue pas « l'app n'a pas tourné »
-        /// de « elle a tourné et n'a rien trouvé à fermer ».
-        case rienÀMontrer(String)
-        case lecture(MiloSessionAttributes)
-    }
-
-    private static func buildState() async -> MiloState {
-        guard let audioData = try? await MiloAPIClient.get(path: "/api/audio/state"),
-              let audio = try? JSONSerialization.jsonObject(with: audioData) as? [String: Any]
-        else { return .injoignable }
-
+    /// Les attributs complets, à partir de l'état déjà lu.
+    ///
+    /// Ne décide plus s'il y a quelque chose à montrer — `refresh()` l'a
+    /// tranché avant d'appeler, et c'est tout l'intérêt : cette fonction coûte
+    /// deux requêtes et un dépôt de pochette, et on ne les paie que pour une
+    /// session que quelqu'un lira.
+    private static func buildAttributes(from audio: [String: Any]) async -> MiloSessionAttributes {
         let metadata = audio["metadata"] as? [String: Any]
         let isPlaying = metadata?["is_playing"] as? Bool ?? false
-
-        if let rien = MiloCardVisibility.nothingToShow(in: audio) {
-            return .rienÀMontrer(rien)
-        }
 
         // Millisecondes côté Milō, secondes côté framework.
         let positionMS = metadata?["position"] as? Double ?? 0
@@ -578,7 +601,7 @@ enum MiloNowPlayingBridge {
             }
         }
 
-        return .lecture(MiloSessionAttributes(
+        return MiloSessionAttributes(
             // Place tenue, jamais envoyée telle quelle : `refresh()` la remplace
             // par l'identifiant de la session qu'il tient, seul que
             // `update(_:)` accepte. L'app n'en mint plus aucun — voir
@@ -589,7 +612,7 @@ enum MiloNowPlayingBridge {
             timestamp: ISO8601DateFormatter().string(from: .now),
             currentTrack: track,
             devices: await buildDevices()
-        ))
+        )
     }
 
     /// Un device par client snapcast, avec son vrai nom.
