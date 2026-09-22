@@ -55,6 +55,11 @@ struct MiloSessionAttributes: RemoteMediaSessionAttributes {
         /// existé, sur des bornes que l'app gardait en cache et ne rafraîchissait
         /// jamais — -80…-21 face à -78…-8 sur l'appareil — et c'est ce qui
         /// faisait monter le son trois fois moins que le doigt ne le demandait.
+        ///
+        /// Ce qu'on **rend** au système porte en revanche un plancher : le
+        /// curseur maître de la carte n'a pas d'API à lui, iOS le synthétise en
+        /// multipliant les niveaux qu'on lui rend, et zéro absorbe tout
+        /// facteur. Voir `MiloAPIClient.renderedLevel`, et ne pas le retirer.
         let volume: Float
     }
 

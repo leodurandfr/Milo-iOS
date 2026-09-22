@@ -299,6 +299,15 @@ extension MiloAPIClient {
     /// partielle juste au lieu de suspecte : une enceinte qu'elle ne mentionne
     /// pas n'a pas bougé, et sa place dans la moyenne est son niveau actuel.
     ///
+    /// Une limite connue, mesurée le 22/09/2026 : pour `m` enceintes citées sur
+    /// `n`, la moyenne rend `1+(m/n)(k−1)` au lieu du facteur `k` demandé — à
+    /// deux sur trois, un ×1,57 devient ×1,38. Mémoriser les cibles du geste
+    /// pour combler les absentes a été essayé et retiré : ça déplace le biais
+    /// sur les changements de direction en cours de geste, et ça détourne un
+    /// geste de pièce qui suit un geste global de moins de 600 ms. Sur cet
+    /// appareil les rafales citent les trois enceintes — les `offset_db` sont
+    /// restés à ±0,000 sur tous les relevés — donc le cas ne se présente pas.
+    ///
     /// **On envoie le niveau visé, pas un facteur.** Le système multiplie bien
     /// les niveaux qu'on lui rend par un facteur commun, mais le relire comme un
     /// gain `20·log₁₀(k)` produisait 33 % là où il en demandait 43, et les
@@ -384,6 +393,15 @@ extension MiloAPIClient {
             let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             return (json?["volume"] as? NSNumber)?.doubleValue
         } catch {
+            // Une écriture annulée n'est pas une écriture en panne :
+            // `flush?.cancel()` abandonne délibérément celle qu'une rafale plus
+            // récente vient de remplacer, et c'est le délestage qui fait que la
+            // dernière valeur du geste est la seule à partir. L'enregistrer ici
+            // faisait passer ce délestage pour une coupure réseau dans le seul
+            // journal qui en parle.
+            if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                return nil
+            }
             defaults?.set("\(label) -> réseau : \(error.localizedDescription)",
                           forKey: "milo_volume_write_error")
             return nil
@@ -397,6 +415,44 @@ extension MiloAPIClient {
     /// rafraîchissement, assez courte pour qu'un refus du serveur redevienne
     /// visible plutôt que d'être masqué indéfiniment.
     static let optimisticVolumeWindow: TimeInterval = 3
+
+    /// Plancher du niveau qu'on **rend** au système.
+    ///
+    /// Le curseur maître de la carte n'a pas d'API à lui : iOS le synthétise en
+    /// multipliant les niveaux qu'on lui rend par un facteur commun — mesuré le
+    /// 22/09/2026, trois enceintes, une rafale à ×1,57 puis ×1,36 puis ×1,27.
+    /// Rendu à zéro, il devient **inerte** : `0 × facteur = 0` quelle que soit
+    /// la poignée, et plus aucun geste ne peut remonter le son. Ce n'est pas une
+    /// course rabotée, c'est une panne franche.
+    ///
+    /// Un pour cent de la course vaut moins d'un décibel au-dessus du plancher
+    /// du limiteur : inaudible, indiscernable de zéro sur un curseur, et il
+    /// suffit à garder un facteur exploitable.
+    ///
+    /// Partagé entre l'extension et l'app : deux définitions du niveau rendu
+    /// donneraient deux bases au même curseur selon que l'app est devant ou
+    /// endormie, et c'est la base qui décide du facteur.
+    static let renderedFloor = 0.01
+
+    static func renderedLevel(_ raw: Double) -> Double {
+        min(max(raw, renderedFloor), 1)
+    }
+
+    /// Oublie ce qu'on avait promis pour ces enceintes.
+    ///
+    /// À n'appeler que quand l'écriture a échoué. Sans cela, l'affichage tient
+    /// trois secondes pleines un niveau que Milō n'a jamais appliqué — ce que
+    /// la lecture du niveau appliqué existe précisément pour éviter, et qui ne
+    /// servait à rien tant que le cas « pas de réponse du tout » n'était pas
+    /// traité.
+    static func forgetOptimistic(macs: [String]) {
+        let defaults = UserDefaults(suiteName: appGroupID)
+        for mac in macs {
+            let plain = mac.replacingOccurrences(of: ":", with: "")
+            defaults?.removeObject(forKey: optimisticLevelKey(plain))
+            defaults?.removeObject(forKey: optimisticVolumeAtKey(plain))
+        }
+    }
 
     /// Pose le niveau optimiste d'une enceinte (MAC déjà sans deux-points).
     ///
@@ -442,6 +498,15 @@ private actor VolumeGesture {
     /// La dernière cible demandée pour chaque enceinte, sur l'échelle du curseur.
     private var pending: [String: Double] = [:]
 
+    /// Numéro du dernier envoi parti.
+    ///
+    /// L'acteur est réentrant sur l'await réseau : sans ce numéro, un envoi lent
+    /// qui reprend repose les niveaux d'un instantané périmé par-dessus ceux
+    /// qu'un envoi plus récent vient d'écrire, et la base rendue au système
+    /// recule en plein geste — donc le facteur suivant se calcule sur un niveau
+    /// qui n'est plus le bon.
+    private var generation: UInt64 = 0
+
     /// Ce que nous avons rendu au système pour **toutes** les enceintes, dans sa
     /// version la plus récente. Il sert deux fois : à compléter la moyenne d'un
     /// geste global avec les enceintes qu'une rafale n'a pas touchées, et à
@@ -450,9 +515,12 @@ private actor VolumeGesture {
     /// Remplacé, et sans purger `pending` au passage. Les cibles sont des
     /// niveaux absolus, pas des écarts : un instantané plus récent ne les périme
     /// pas. Il ne périme que les niveaux des enceintes restées immobiles,
-    /// qu'on veut justement les plus frais possible. C'est ce qui permet de se
-    /// passer d'une estampille de génération : quand la base ne sert plus à
-    /// rien, une base périmée ne peut plus mentir.
+    /// qu'on veut justement les plus frais possible.
+    ///
+    /// Ça suffisait tant que rien ne relisait cette base **après** un aller-retour
+    /// réseau. Ce n'est plus vrai : la correction post-écriture, elle, s'exécute
+    /// de l'autre côté d'un await sur lequel l'acteur est réentrant, et c'est
+    /// `generation` qui l'empêche de reposer un instantané d'avant.
     private var snapshot: [String: Double] = [:]
     private var flush: Task<Void, Never>?
 
@@ -477,9 +545,13 @@ private actor VolumeGesture {
     /// précédent, dont l'attente se dénoue aussitôt — `Task.sleep` jette à
     /// l'annulation, et la garde qui suit rend la main sans écrire.
     ///
-    /// Les entrées de `tasks` ne sont pas retirées : le dictionnaire est indexé
-    /// par enceinte, donc borné par leur nombre. Le nettoyer demanderait de
-    /// distinguer sa propre tâche de celle qui l'a remplacée, pour rien.
+    /// Ce que cette annulation coûte, et qu'elle coûtait déjà : `send` a vidé
+    /// `pending` avant de partir, si bien qu'une enceinte citée par la rafale
+    /// abandonnée et pas par la suivante n'est jamais réécrite. Sur le chemin
+    /// global c'est sans effet — une seule requête porte tout le monde — et sur
+    /// le chemin par enceinte l'écart se referme au geste suivant. Le corriger
+    /// demanderait de ne retirer de `pending` que ce qui est réellement parti,
+    /// ce qui n'a pas paru valoir le risque tant que le geste maître aboutit.
     func record(mac: String, target: Double, snapshot: [String: Double]) async {
         pending[mac] = target
         self.snapshot = snapshot
@@ -499,9 +571,25 @@ private actor VolumeGesture {
         let entries = pending
         let shown = snapshot
         pending = [:]
-        guard !entries.isEmpty else { return }
+        guard !entries.isEmpty, !shown.isEmpty else { return }
 
-        if MiloAPIClient.isGlobalGesture(touched: entries.count, deviceCount: shown.count),
+        generation &+= 1
+        let mine = generation
+
+        // Une enceinte que l'instantané ne connaît pas ne peut pas peser dans
+        // une moyenne indexée sur lui : elle ne compte pas pour décider de la
+        // nature du geste. C'est bien un compte à part et non un filtre sur
+        // `entries` : une rafale d'une seule enceinte connue sur deux rendues
+        // était lue comme globale, alors qu'un doigt ne tient qu'un curseur de
+        // pièce à la fois.
+        //
+        // Sa cible à elle est perdue si la rafale part quand même en global —
+        // mais une enceinte absente de ce qu'on a rendu n'a pas de place dans
+        // le décalage que Milō va appliquer, et elle reviendra avec le prochain
+        // instantané.
+        let seen = entries.filter { shown[$0.key] != nil }
+
+        if MiloAPIClient.isGlobalGesture(touched: seen.count, deviceCount: shown.count),
            let target = MiloAPIClient.globalTarget(touched: entries, snapshot: shown) {
             // Les niveaux optimistes décrivent ce que Milō va **appliquer** —
             // le même écart pour tout le monde — et non les cibles brutes du
@@ -510,10 +598,25 @@ private actor VolumeGesture {
             let mean = shown.values.reduce(0, +) / Double(shown.count)
             noteShift(shown: shown, to: target, from: mean)
             MiloAPIClient.trace?(
-                "geste global → \(Self.rounded(target)) (\(entries.count)/\(shown.count))")
+                "geste global → \(Self.rounded(target)) (\(seen.count)/\(shown.count))")
 
             let applied = await MiloAPIClient.writeGlobalVolume(level: target)
-            if let applied, abs(applied - target) > 0.001 {
+
+            // Annulé, ou déjà remplacé : une rafale plus récente a posé ses
+            // propres niveaux et lancé sa propre écriture. Toucher à quoi que
+            // ce soit ici l'écraserait avec un instantané d'avant, et la base
+            // rendue au système reculerait en plein geste.
+            guard !Task.isCancelled, generation == mine else { return }
+
+            guard let applied else {
+                // Sans cette branche, l'affichage tenait trois secondes pleines
+                // un niveau que Milō n'avait jamais appliqué — exactement ce
+                // que la lecture du niveau appliqué existe pour éviter.
+                MiloAPIClient.forgetOptimistic(macs: Array(shown.keys))
+                MiloAPIClient.trace?("global échoué, affichage rendu à Milō")
+                return
+            }
+            if abs(applied - target) > 0.001 {
                 noteShift(shown: shown, to: applied, from: mean)
                 MiloAPIClient.trace?("global appliqué → \(Self.rounded(applied))")
             }
@@ -528,13 +631,24 @@ private actor VolumeGesture {
             for (mac, target) in entries {
                 group.addTask {
                     let applied = await MiloAPIClient.writeClientVolume(mac: mac, level: target)
-                    if let applied, abs(applied - target) > 0.001 {
+                    guard !Task.isCancelled, await self.isCurrent(mine) else { return }
+                    guard let applied else {
+                        MiloAPIClient.forgetOptimistic(macs: [mac])
+                        return
+                    }
+                    if abs(applied - target) > 0.001 {
                         MiloAPIClient.noteOptimistic(mac: mac, level: applied)
                     }
                 }
             }
         }
     }
+
+    /// Cet envoi est-il toujours le dernier parti ?
+    ///
+    /// La même garde que sur le chemin global, mais lisible depuis la tâche
+    /// enfant du groupe, qui n'est pas isolée sur l'acteur.
+    private func isCurrent(_ number: UInt64) -> Bool { generation == number }
 
     /// Répartit un niveau global sur les enceintes en les décalant toutes du
     /// même écart — la règle que `set_volume_db` applique côté Milō.

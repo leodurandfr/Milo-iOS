@@ -103,6 +103,42 @@ struct VolumeGestureTests {
     }
 }
 
+/// Le niveau **rendu** au système, et ce qui arrive quand il vaut zéro.
+///
+/// Le curseur maître de la carte Now Playing n'a pas d'API à lui : iOS le
+/// synthétise en multipliant les niveaux qu'on lui rend par un facteur commun —
+/// mesuré le 22/09/2026 sur trois enceintes, une rafale à ×1,57 puis ×1,36 puis
+/// ×1,27. Un zéro rendu est donc absorbant, et ces tests figent le plancher qui
+/// l'empêche.
+struct RenderedLevelTests {
+
+    @Test("Zéro rendu rendrait le curseur maître inerte, donc on ne rend pas zéro")
+    func zeroIsNeverRendered() {
+        #expect(MiloAPIClient.renderedLevel(0) == MiloAPIClient.renderedFloor)
+        #expect(MiloAPIClient.renderedLevel(-1) == MiloAPIClient.renderedFloor)
+
+        // La démonstration de pourquoi : le système multiplie, et zéro absorbe
+        // tout facteur. Sans plancher, aucune poignée ne remonte le son.
+        let inerte = 0.0 * 2.0
+        #expect(inerte == 0)
+        #expect(MiloAPIClient.renderedLevel(0) * 2 > 0)
+    }
+
+    @Test("Le plancher reste inaudible")
+    func theFloorIsInaudible() {
+        // Sur les bornes de l'appareil (-78…-8 dB), 1 % de la course vaut
+        // 0,7 dB au-dessus du plancher du limiteur.
+        #expect(MiloAPIClient.renderedFloor * 70 < 1.0)
+    }
+
+    @Test("Ailleurs, le niveau passe tel quel")
+    func everythingElsePassesThrough() {
+        #expect(MiloAPIClient.renderedLevel(0.5) == 0.5)
+        #expect(MiloAPIClient.renderedLevel(1) == 1)
+        #expect(MiloAPIClient.renderedLevel(2) == 1)
+    }
+}
+
 /// Le niveau optimiste, celui que l'affichage préfère pendant trois secondes.
 ///
 /// Il est rangé sur l'échelle du curseur. La version précédente y rangeait des
@@ -123,6 +159,35 @@ struct OptimisticLevelTests {
         defaults?.removeObject(forKey: MiloAPIClient.optimisticLevelKey(mac))
         defaults?.removeObject(forKey: MiloAPIClient.optimisticVolumeAtKey(mac))
         defaults?.removeObject(forKey: "milo_opt_vol_\(mac)")
+    }
+
+    @Test("Une écriture qui n'aboutit pas rend la main à Milō tout de suite")
+    func aFailedWriteHandsTheDisplayBack() {
+        // Sans cette remise à zéro, l'affichage tenait trois secondes pleines
+        // un niveau que Milō n'avait jamais appliqué.
+        let mac = "aabbccdd0005"
+        forget(mac)
+        defer { forget(mac) }
+
+        MiloAPIClient.noteOptimistic(mac: mac, level: 0.9)
+        #expect(MiloAPIClient.optimisticLevel(mac: mac) == 0.9)
+
+        MiloAPIClient.forgetOptimistic(macs: [mac])
+        #expect(MiloAPIClient.optimisticLevel(mac: mac) == nil)
+    }
+
+    @Test("L'oubli accepte une MAC à deux-points comme l'écriture")
+    func forgettingAcceptsAColonedMac() {
+        // `forgetOptimistic` est appelé avec les clés de l'instantané, qui
+        // portent les deux-points ; `noteOptimistic` reçoit des MAC déjà
+        // nettoyées. Les deux doivent viser la même clé.
+        let plain = "aabbccdd0006"
+        forget(plain)
+        defer { forget(plain) }
+
+        MiloAPIClient.noteOptimistic(mac: plain, level: 0.7)
+        MiloAPIClient.forgetOptimistic(macs: ["aa:bb:cc:dd:00:06"])
+        #expect(MiloAPIClient.optimisticLevel(mac: plain) == nil)
     }
 
     @Test("Ce qui est posé est ce que le curseur montre, sans conversion")

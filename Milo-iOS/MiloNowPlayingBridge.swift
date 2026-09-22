@@ -553,7 +553,11 @@ enum MiloNowPlayingBridge {
                 id: mac,
                 name: rooms[mac]?["name"] as? String ?? "Milō \(mac.suffix(5))",
                 type: "speaker",
-                volume: Float(min(max(level, 0), 1))
+                // Même plancher que `displayedVolume` : deux définitions du
+                // niveau rendu donneraient deux bases au même curseur selon que
+                // l'app est devant ou endormie, et c'est la base qui décide du
+                // facteur que le système applique.
+                volume: Float(MiloAPIClient.renderedLevel(level))
             )
         }
     }

@@ -456,7 +456,18 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     var devices: [MediaDevice] {
         miloLog.info("devices lu : \(self.attributes.devices.count, privacy: .public) enceinte(s)")
 
-        let shown = attributes.devices.map { (device: $0, level: Self.displayedVolume($0)) }
+        // Dédupliqué avant tout le reste. `attributes.devices` est un simple
+        // tableau décodé d'un payload APNs : rien ne garantit que Milō n'y
+        // mette pas deux fois le même snapclient, et deux entrées de même
+        // identifiant donneraient deux `MediaDevice` de même id — donc deux
+        // curseurs pour une seule enceinte, et deux fermetures qui s'écrivent
+        // dessus — en plus de faire trapper le `Dictionary` ci-dessous.
+        var identifiers = Set<String>()
+        let unique = attributes.devices.reversed()
+            .filter { identifiers.insert($0.id).inserted }
+            .reversed()
+
+        let shown = unique.map { (device: $0, level: Self.displayedVolume($0)) }
 
         // Ce que le système a sous les yeux, figé ici et passé en entier à
         // chaque rappel. Il en faut l'ensemble, pas seulement un compte : le
@@ -465,7 +476,13 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         // enceintes, même rapport à sept chiffres — et ses rafales ne portent
         // pas toujours les mêmes enceintes. Reconstituer la moyenne qu'il vise
         // demande donc de savoir où sont celles qu'une rafale n'a pas citées.
-        let snapshot = Dictionary(uniqueKeysWithValues: shown.map { ($0.device.id, $0.level) })
+        // `uniquingKeysWith` et non `uniqueKeysWithValues`, qui fait un trap
+        // sur une clé répétée : la déduplication ci-dessus la rend déjà
+        // impossible, et c'est précisément pour ça qu'on ne veut pas d'un trap
+        // ici — il n'y aurait plus rien pour l'attraper si elle cessait de
+        // l'être. Même règle que la déduplication : la dernière l'emporte.
+        let snapshot = Dictionary(shown.map { ($0.device.id, $0.level) },
+                                  uniquingKeysWith: { _, last in last })
 
         // Tracée quand elle change : sans elle au journal, le facteur que le
         // système applique ensuite n'est pas interprétable.
@@ -514,9 +531,12 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// -78…-8, une valeur optimiste reconvertie sur -80…-21 — ce choix entre
     /// les deux déplaçait le curseur à lui seul, à chaque expiration de la
     /// fenêtre.
+    /// Le plancher n'est pas cosmétique : le curseur maître **multiplie** ce
+    /// qu'on lui rend, et zéro le rend inerte pour toujours. Voir
+    /// `MiloAPIClient.renderedLevel`.
     private static func displayedVolume(_ device: MiloSessionAttributes.Device) -> Float {
-        guard let level = MiloAPIClient.optimisticLevel(mac: device.id) else { return device.volume }
-        return Float(level)
+        let raw = MiloAPIClient.optimisticLevel(mac: device.id) ?? Double(device.volume)
+        return Float(MiloAPIClient.renderedLevel(raw))
     }
 
     /// Ce que sont vraiment les octets qu'on s'apprête à rendre.
