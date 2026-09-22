@@ -1,6 +1,78 @@
 import Foundation
 import NowPlaying
 
+/// La règle d'affichage de la carte, séparée de la session qu'elle commande.
+///
+/// Hors de `MiloNowPlayingBridge`, qui est `@available(iOS 27, *)` parce que
+/// `RemoteMediaSession` l'exige — alors que décider s'il y a quelque chose à
+/// montrer ne tient qu'à un dictionnaire. La séparation n'est pas cosmétique :
+/// le macro `@Test` refuse une fonction moins disponible que la cible de test,
+/// si bien que la règle restait sans test tant qu'elle vivait derrière cette
+/// barrière — et c'est une règle qui décide seule si la carte de l'écran
+/// verrouillé existe.
+enum MiloCardVisibility {
+
+    /// Cet état nomme-t-il quelque chose ?
+    ///
+    /// Même prédicat que `PushService._displays_something` côté Milō, et sur le
+    /// même champ : `bool(metadata.get("title"))`. Depuis que chaque source
+    /// remplit le socle `title / artist / album / album_art_url` — y compris
+    /// **arrêtée**, où elle y met ce qu'une pression sur play reprendrait —
+    /// c'est `title` qui dit si une carte aurait un nom à porter.
+    ///
+    /// Lu sur le socle, jamais sur la cascade de `buildState`. Poser la
+    /// question à un deuxième champ est exactement comment « l'écran verrouillé
+    /// montre une session » et « l'état dit qu'il y en a une » se mettent à
+    /// diverger, et Milō a supprimé la sienne en remplissant le socle.
+    static func namesSomething(_ metadata: [String: Any]?) -> Bool {
+        !((metadata?["title"] as? String) ?? "").isEmpty
+    }
+
+    /// Pourquoi il n'y a rien à montrer — ou `nil` quand il y a quelque chose.
+    ///
+    /// Miroir de ce que Milō décide de son côté, dans le même ordre :
+    ///
+    /// - source **active** : la carte vit, quoi que dise la métadonnée ;
+    /// - source pas active **mais qui nomme quelque chose** : la carte **tient**,
+    ///   en pause, sur ce qu'une pression sur play reprendrait ;
+    /// - source pas active **et qui ne nomme rien** : la carte se ferme.
+    ///
+    /// La conjonction n'est pas un détail. Un prédicat sur le seul `title`
+    /// fermerait la carte sous une source qui joue : une source peut passer
+    /// ACTIVE avant sa première métadonnée — voir `MiloSessionAttributes`. Et
+    /// `source_state` seul est ce qui fermait la carte sur un arrêt reprenable,
+    /// ce que ceci corrige.
+    ///
+    /// `source_state` n'est d'ailleurs pas la chaîne libre qu'on croyait ici :
+    /// c'est une énumération à quatre valeurs — `starting`, `ready`, `active`,
+    /// `error` — et `ready` ne veut plus dire « rien à montrer », il veut dire
+    /// « pas de session vivante ». L'identité survit à l'arrêt ; seule la
+    /// session ne lui survit pas.
+    static func nothingToShow(in audio: [String: Any]) -> String? {
+        // Le battement d'un changement de source. Fermer là ferait disparaître
+        // puis réapparaître la carte à chaque bascule.
+        if audio["transitioning"] as? Bool ?? false { return nil }
+
+        let metadata = audio["metadata"] as? [String: Any]
+        let source = audio["active_source"] as? String ?? ""
+        let sourceState = audio["source_state"] as? String ?? ""
+        let named = namesSomething(metadata)
+
+        guard source.isEmpty || source == "none"
+                || (sourceState != "active" && !named)
+                // Un trou de métadonnées sous une source qui joue ne doit pas
+                // fermer la session ; sous une source qui ne joue pas, si.
+                || ((metadata?.isEmpty ?? true)
+                    && !(metadata?["is_playing"] as? Bool ?? false))
+        else { return nil }
+
+        // Le verdict a deux moitiés, et une trace qui n'en porte qu'une ne dit
+        // pas laquelle a fermé la carte.
+        return "\(source.isEmpty ? "-" : source)/\(sourceState.isEmpty ? "-" : sourceState)/"
+            + (named ? "nommé" : "sans titre")
+    }
+}
+
 /// Ouvre et entretient la session Now Playing pendant que l'app tourne.
 ///
 /// C'est le chemin **sans APNs** : `RemoteMediaSession.update(_:)` est un appel
@@ -313,8 +385,8 @@ enum MiloNowPlayingBridge {
     ///
     /// - **le système ne tient rien** — `sessions()` vide, pas seulement « l'app
     ///   n'en tient pas » ; c'est la distinction qui a coûté la panne ;
-    /// - **quelque chose joue**, sinon il n'y a rien à afficher et la carte
-    ///   resterait vide sur l'écran verrouillé ;
+    /// - **quelque chose joue** — et depuis qu'une source arrêtée garde sa
+    ///   carte, cette garde-là mérite sa propre justification, plus bas ;
     /// - **un essai toutes les dix secondes** au plus.
     ///
     /// Et l'app peut ce que le push ne peut pas : `requestToBecomeSystemPrimary()`
@@ -325,6 +397,21 @@ enum MiloNowPlayingBridge {
     /// l'app n'a jamais été lancée. Ça couvre le cas où la musique jouait déjà
     /// avant qu'on ouvre l'app — où rien n'ouvrait de session, puisque Milō
     /// n'envoie un `start` que sur un événement de lecture.
+    ///
+    /// **`isPlaying` reste, et ce n'est pas un oubli depuis que `nothingToShow`
+    /// tient la carte sur une source arrêtée.** Ouvrir et ne pas fermer sont
+    /// deux droits distincts, et Milō ne s'accorde que le second : son
+    /// `_start_session` n'est atteint que sous `_has_active_source`, donc il
+    /// n'ouvre jamais pour une source arrêtée, et il ferme celle qui existe au
+    /// bout de cinq minutes d'inactivité.
+    ///
+    /// Laisser passer une source arrêtée ici ferait donc rouvrir, deux secondes
+    /// plus tard, la carte que Milō vient de fermer — et pour toujours, la
+    /// boucle de premier plan n'ayant aucune expiration à elle. Ce serait
+    /// reprendre à Milō le cycle de vie que tout ce fichier lui laisse.
+    ///
+    /// La carte en pause s'ouvre donc comme avant : pendant que ça jouait. Ce
+    /// qui a changé est qu'elle ne se ferme plus à l'arrêt.
     private static func openSession(_ attributes: MiloSessionAttributes) async {
         guard !systemHoldsAny, attributes.isPlaying,
               Date().timeIntervalSince(lastStartAttempt) > startRetryDelay
@@ -431,24 +518,8 @@ enum MiloNowPlayingBridge {
         let metadata = audio["metadata"] as? [String: Any]
         let isPlaying = metadata?["is_playing"] as? Bool ?? false
 
-        // Rien à montrer, et on le dit.
-        //
-        // `source_state` est une chaîne libre dans le contrat — seul « active »
-        // est attesté. On teste donc l'égalité à « active » plutôt que
-        // d'énumérer les autres valeurs, qui peuvent changer sans nous prévenir.
-        //
-        // `transitioning` exclut le battement d'un changement de source : la
-        // fermer là ferait disparaître puis réapparaître la carte à chaque
-        // bascule. Et `metadata` vide compte comme rien seulement si la lecture
-        // ne tourne pas — un trou de métadonnées sous une source qui joue ne
-        // doit pas fermer la session.
-        let source = audio["active_source"] as? String ?? ""
-        let sourceState = audio["source_state"] as? String ?? ""
-        let transitioning = audio["transitioning"] as? Bool ?? false
-        if !transitioning,
-           source.isEmpty || source == "none" || sourceState != "active"
-            || ((metadata?.isEmpty ?? true) && !isPlaying) {
-            return .rienÀMontrer("\(source.isEmpty ? "-" : source)/\(sourceState.isEmpty ? "-" : sourceState)")
+        if let rien = MiloCardVisibility.nothingToShow(in: audio) {
+            return .rienÀMontrer(rien)
         }
 
         // Millisecondes côté Milō, secondes côté framework.

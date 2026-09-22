@@ -355,3 +355,146 @@ struct StationPrimingTests {
         #expect(MiloAPIClient.stationArtworkToPrime(in: stations).count == 40)
     }
 }
+
+/// Quand la carte de l'écran verrouillé doit se fermer, et quand elle doit tenir.
+///
+/// Le prédicat est le miroir de `PushService._displays_something` côté Milō :
+/// une source **active** garde sa carte quoi qu'elle dise, une source arrêtée
+/// la garde tant qu'elle nomme quelque chose, et ne la perd que lorsqu'il n'y a
+/// plus rien à reprendre. Ces deux moitiés sont ce que le test `source_state !=
+/// "active"` seul confondait : il fermait la carte sur un arrêt reprenable.
+///
+/// Les payloads sont ceux que Milō publie vraiment. Les clés dont la valeur est
+/// nulle sont **absentes** et pas à `null` — le backend les filtre avant
+/// d'émettre — donc une radio arrêtée n'a ni `artist` ni `track_*`.
+struct NowPlayingVisibilityTests {
+
+    private func verdict(_ audio: [String: Any]) -> String? {
+        MiloCardVisibility.nothingToShow(in: audio)
+    }
+
+    @Test("Une station arrêtée garde sa carte, avec ce qu'un play reprendrait")
+    func aStoppedStationHoldsItsCard() {
+        // `_idle_metadata` de la radio projette `_last_station` : le titre est
+        // le nom de la station, la pochette son favicon proxifié.
+        #expect(verdict([
+            "active_source": "radio",
+            "source_state": "ready",
+            "transitioning": false,
+            "metadata": [
+                "is_playing": false,
+                "is_buffering": false,
+                "station_name": "FIP",
+                "title": "FIP",
+                "album": "FIP",
+                "album_art_url": "/api/radio/favicon?url=https%3A%2F%2Ffip.fr%2Ficon.png",
+            ],
+        ]) == nil)
+    }
+
+    @Test("Une station qui joue garde sa carte")
+    func aPlayingStationHoldsItsCard() {
+        #expect(verdict([
+            "active_source": "radio",
+            "source_state": "active",
+            "transitioning": false,
+            "metadata": [
+                "is_playing": true,
+                "title": "Miles Davis - So What",
+                "artist": "Miles Davis",
+                "album": "FIP",
+            ],
+        ]) == nil)
+    }
+
+    @Test("Une source active sans métadonnée garde sa carte")
+    func anActiveSourceWithoutMetadataHoldsItsCard() {
+        // Une source peut passer ACTIVE avant sa première métadonnée. C'est
+        // pour ce cas-là que le titre ne décide qu'en l'absence de source
+        // active : un prédicat sur le seul titre fermerait ici.
+        #expect(verdict([
+            "active_source": "bluetooth",
+            "source_state": "active",
+            "transitioning": false,
+            "metadata": ["is_playing": true],
+        ]) == nil)
+    }
+
+    @Test("Un épisode terminé ferme la carte")
+    func aFinishedEpisodeClosesTheCard() {
+        // `_forget_resume` vide la case de reprise : la projection est vide et
+        // le podcast retombe sur la paire inerte. Il n'y a plus rien à
+        // reprendre, donc plus rien à afficher.
+        #expect(verdict([
+            "active_source": "podcast",
+            "source_state": "ready",
+            "transitioning": false,
+            "metadata": ["is_playing": false, "is_buffering": false],
+        ]) != nil)
+    }
+
+    @Test("Le repos mesuré ferme la carte")
+    func theMeasuredRestClosesTheCard() {
+        // Relevé sur `/api/audio/state` le 22/09/2026, unité au repos.
+        #expect(verdict([
+            "active_source": "spotify",
+            "source_state": "ready",
+            "transitioning": false,
+            "metadata": ["is_playing": false, "is_buffering": false],
+        ]) != nil)
+    }
+
+    @Test("Un changement de source ne fait pas clignoter la carte")
+    func aSourceChangeDoesNotFlicker() {
+        // `transitioning` est bref et certain : pendant ce battement, rien
+        // n'est prêt et fermer ferait disparaître puis revenir la carte.
+        #expect(verdict([
+            "active_source": "none",
+            "source_state": "ready",
+            "transitioning": true,
+            "metadata": [:],
+        ]) == nil)
+    }
+
+    @Test("Aucune source ferme la carte, même en nommant quelque chose")
+    func noSourceClosesTheCard() {
+        #expect(verdict([
+            "active_source": "none",
+            "source_state": "ready",
+            "transitioning": false,
+            "metadata": ["is_playing": false, "title": "FIP"],
+        ]) != nil)
+    }
+
+    @Test("Une métadonnée vide sous une source qui ne joue pas ferme la carte")
+    func anEmptyMetadataUnderASilentSourceClosesTheCard() {
+        // La garde mesurée en 8c8feef, conservée : active, mais rien dedans et
+        // rien qui sort.
+        #expect(verdict([
+            "active_source": "airplay",
+            "source_state": "active",
+            "transitioning": false,
+            "metadata": [:],
+        ]) != nil)
+    }
+
+    @Test("La trace dit laquelle des deux moitiés a fermé la carte")
+    func theTraceNamesTheHalfThatClosed() {
+        // Sans ça, « radio/ready » se lit pareil qu'une station arrêtée qu'on
+        // aurait eu tort de fermer.
+        #expect(verdict([
+            "active_source": "podcast",
+            "source_state": "ready",
+            "transitioning": false,
+            "metadata": ["is_playing": false, "is_buffering": false],
+        ]) == "podcast/ready/sans titre")
+    }
+
+    @Test("Un titre vide ne nomme rien")
+    func anEmptyTitleNamesNothing() {
+        #expect(MiloCardVisibility.namesSomething(["title": ""]) == false)
+        #expect(MiloCardVisibility.namesSomething(["title": "FIP"]))
+        #expect(MiloCardVisibility.namesSomething([:]) == false)
+        #expect(MiloCardVisibility.namesSomething(nil) == false)
+    }
+}
