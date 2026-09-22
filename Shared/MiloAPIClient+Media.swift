@@ -299,14 +299,24 @@ extension MiloAPIClient {
     /// partielle juste au lieu de suspecte : une enceinte qu'elle ne mentionne
     /// pas n'a pas bougé, et sa place dans la moyenne est son niveau actuel.
     ///
-    /// Une limite connue, mesurée le 22/09/2026 : pour `m` enceintes citées sur
-    /// `n`, la moyenne rend `1+(m/n)(k−1)` au lieu du facteur `k` demandé — à
-    /// deux sur trois, un ×1,57 devient ×1,38. Mémoriser les cibles du geste
-    /// pour combler les absentes a été essayé et retiré : ça déplace le biais
-    /// sur les changements de direction en cours de geste, et ça détourne un
-    /// geste de pièce qui suit un geste global de moins de 600 ms. Sur cet
-    /// appareil les rafales citent les trois enceintes — les `offset_db` sont
-    /// restés à ±0,000 sur tous les relevés — donc le cas ne se présente pas.
+    /// Il existe une dilution théorique : pour `m` enceintes citées sur `n`, la
+    /// moyenne rend `1+(m/n)(k−1)` au lieu du facteur `k` demandé — à deux sur
+    /// trois, un ×1,57 deviendrait ×1,38.
+    ///
+    /// **Elle ne peut pas se produire ici, et c'est mesuré.** Journal de
+    /// l'extension du 22/09/2026, 945 rappels sur 46 minutes et cinq processus,
+    /// rejoués à travers la coalescence de 180 ms : **315 envois sur 315
+    /// portaient les trois enceintes**. Aucune rafale partielle, aucune rafale
+    /// d'une seule enceinte. Et ce n'est pas de justesse — iOS émet ses trois
+    /// rappels en **2 ms au pire** (médiane 1 ms), la rafale suivante n'arrive
+    /// jamais avant **212 ms**, et le seuil de 180 ms tombe pile dans ce vide.
+    /// Deux ordres de grandeur de marge de chaque côté.
+    ///
+    /// Ne pas « corriger » ça sans avoir d'abord remesuré ce ratio. Mémoriser
+    /// les cibles du geste pour combler les absentes a été essayé deux fois et
+    /// retiré deux fois : ça déplace le biais sur les changements de direction
+    /// en cours de geste, et le garde-fou qui l'accompagnait détournait un vrai
+    /// geste de pièce fait moins de 600 ms après un geste global.
     ///
     /// **On envoie le niveau visé, pas un facteur.** Le système multiplie bien
     /// les niveaux qu'on lui rend par un facteur commun, mais le relire comme un
