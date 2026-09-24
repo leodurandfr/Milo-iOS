@@ -12,75 +12,38 @@ import NowPlaying
 /// verrouillé existe.
 enum MiloCardVisibility {
 
-    /// Cet état nomme-t-il quelque chose ?
-    ///
-    /// Même prédicat que `PushService._displays_something` côté Milō, et sur le
-    /// même champ : `bool(metadata.get("title"))`. Depuis que chaque source
-    /// remplit le socle `title / artist / album / album_art_url` — y compris
-    /// **arrêtée**, où elle y met ce qu'une pression sur play reprendrait —
-    /// c'est `title` qui dit si une carte aurait un nom à porter.
-    ///
-    /// Lu sur le socle, jamais sur la cascade de `buildState`. Poser la
-    /// question à un deuxième champ est exactement comment « l'écran verrouillé
-    /// montre une session » et « l'état dit qu'il y en a une » se mettent à
-    /// diverger, et Milō a supprimé la sienne en remplissant le socle.
-    static func namesSomething(_ metadata: [String: Any]?) -> Bool {
-        !((metadata?["title"] as? String) ?? "").isEmpty
-    }
-
     /// Pourquoi il n'y a rien à montrer — ou `nil` quand il y a quelque chose.
     ///
-    /// Miroir de ce que Milō décide de son côté, dans le même ordre :
+    /// La règle est celle du fil (« Développeurs : le fil », §9), la même que
+    /// Milō applique quand il construit ses notifications, dans cet ordre :
     ///
-    /// - source **active** : la carte vit, quoi que dise la métadonnée ;
-    /// - source pas active **mais qui nomme quelque chose** : la carte **tient**,
-    ///   en pause, sur ce qu'une pression sur play reprendrait ;
-    /// - source pas active **et qui ne nomme rien** : la carte se ferme.
+    /// - **changement de source en cours** (`switching`) : la carte **tient**.
+    ///   Rien n'est prêt pendant ce battement, et fermer ferait disparaître
+    ///   puis réapparaître la carte à chaque bascule ;
+    /// - **aucune source** : la carte se ferme ;
+    /// - **la session ou la reprise porte un titre** : la carte vit — en
+    ///   lecture, en pause, ou arrêtée sur ce qu'une pression sur play
+    ///   reprendrait ;
+    /// - sinon la carte se ferme : il n'y a rien à nommer.
     ///
-    /// La conjonction n'est pas un détail. Un prédicat sur le seul `title`
-    /// fermerait la carte sous une source qui joue : une source peut passer
-    /// ACTIVE avant sa première métadonnée — voir `MiloSessionAttributes`. Et
-    /// `source_state` seul est ce qui fermait la carte sur un arrêt reprenable,
-    /// ce que ceci corrige.
+    /// « Porte un titre » est `MiloAudioState.shown`, lu dans le fichier que
+    /// l'app partage octet pour octet avec Milo-Mac : la carte de l'écran
+    /// verrouillé et la ligne de la barre des menus ne peuvent pas diverger sur
+    /// la question.
     ///
-    /// `source_state` n'est d'ailleurs pas la chaîne libre qu'on croyait ici :
-    /// c'est une énumération à quatre valeurs — `starting`, `ready`, `active`,
-    /// `error` — et `ready` ne veut plus dire « rien à montrer », il veut dire
-    /// « pas de session vivante ». L'identité survit à l'arrêt ; seule la
-    /// session ne lui survit pas.
-    static func nothingToShow(in audio: [String: Any]) -> String? {
-        // Le battement d'un changement de source. Fermer là ferait disparaître
-        // puis réapparaître la carte à chaque bascule.
-        if audio["transitioning"] as? Bool ?? false { return nil }
+    /// Ce qui a changé avec le fil : une source **active** ne garde plus sa
+    /// carte sans titre. Le fil publie désormais la phase elle-même, et une
+    /// session sans titre est une session qui n'a rien à afficher — AirPlay en
+    /// temps réel, un Bluetooth sans lecteur, le Mac. Milō n'ouvre pas de carte
+    /// pour elles ; l'app n'en garde pas non plus.
+    static func nothingToShow(in state: MiloAudioState) -> String? {
+        if state.switching { return nil }
+        if state.source != "none", state.shown != nil { return nil }
 
-        let metadata = audio["metadata"] as? [String: Any]
-        let source = audio["active_source"] as? String ?? ""
-        let sourceState = audio["source_state"] as? String ?? ""
-        let named = namesSomething(metadata)
-
-        // Il y avait ici une troisième clause — « métadonnée vide **et** rien
-        // qui joue » — censée protéger un trou de métadonnées sous une source
-        // qui joue. Elle ne protégeait rien : `is_playing` se lit dans la
-        // métadonnée que la première moitié exige vide, donc la seconde était
-        // vraie chaque fois qu'elle était évaluée. Écrite ainsi depuis 8c8feef,
-        // jamais tombée parce qu'aucun test ne couvrait une source active sans
-        // métadonnée — c'est ce que fige maintenant
-        // `anActiveSourceWithoutMetadataHoldsItsCard`.
-        //
-        // Retirée plutôt que réparée, et il n'y a rien à réparer : quand la
-        // métadonnée est vide, elle ne peut pas dire si ça joue, et le seul
-        // témoin qui reste est `source_state`. « Pas active et ne nomme rien »
-        // le dit déjà, juste au-dessus. Une source active garde donc sa carte
-        // quoi que dise sa métadonnée, ce qui est la règle annoncée et celle
-        // que `_has_active_source` applique de l'autre côté.
-        guard source.isEmpty || source == "none"
-                || (sourceState != "active" && !named)
-        else { return nil }
-
-        // Le verdict a deux moitiés, et une trace qui n'en porte qu'une ne dit
-        // pas laquelle a fermé la carte.
-        return "\(source.isEmpty ? "-" : source)/\(sourceState.isEmpty ? "-" : sourceState)/"
-            + (named ? "nommé" : "sans titre")
+        // Le verdict a plusieurs moitiés, et une trace qui n'en porte qu'une ne
+        // dit pas laquelle a fermé la carte.
+        let phase = state.session.map(\.phase.rawValue) ?? "sans session"
+        return "\(state.source)/\(state.service.rawValue)/\(phase)/sans titre"
     }
 }
 
@@ -249,14 +212,24 @@ enum MiloNowPlayingBridge {
         // dessous, qui doit au contraire l'effacer — les deux se lisaient comme
         // « pas d'attributs » et menaient au même `return`, d'où la carte figée
         // sur la piste d'avant à chaque changement de source.
-        guard let audioData = try? await MiloAPIClient.get(path: "/api/audio/state"),
-              let audio = try? JSONSerialization.jsonObject(with: audioData) as? [String: Any]
-        else {
+        guard let audioData = try? await MiloAPIClient.get(path: "/api/audio/state") else {
             note("pas d'état exploitable depuis Milō")
             return
         }
 
-        if let seen = MiloCardVisibility.nothingToShow(in: audio) {
+        // Un état que cette version ne sait pas lire — une valeur inconnue de
+        // `service` ou de `phase`, un champ manquant — ne change rien non plus :
+        // c'est un désaccord de contrat avec Milō, pas une fin de lecture. Tracé
+        // à part, parce que « injoignable » ne se corrige pas pareil.
+        let state: MiloAudioState
+        do {
+            state = try MiloAudioState.decode(audioData)
+        } catch {
+            note("état illisible : \(error)")
+            return
+        }
+
+        if let seen = MiloCardVisibility.nothingToShow(in: state) {
             // Réconcilier d'abord : on ferme ce que le système tient vraiment,
             // pas ce que l'app croit tenir.
             await reconcileSession()
@@ -289,13 +262,13 @@ enum MiloNowPlayingBridge {
         // s'ouvre aussi quand personne ne tient de session et n'en ouvrira, et
         // ces trois requêtes toutes les deux secondes partaient alors à la
         // poubelle — pour toute la durée où l'app reste au premier plan.
-        let isPlaying = (audio["metadata"] as? [String: Any])?["is_playing"] as? Bool ?? false
+        let isPlaying = state.session?.phase == .playing
         guard session != nil || mayOpenSession(isPlaying: isPlaying) else {
             note("aucune session, et rien à ouvrir")
             return
         }
 
-        let attributes = await buildAttributes(from: audio)
+        let attributes = await buildAttributes(from: state)
 
         // Ne pousser que ce qui change l'affichage.
         //
@@ -449,8 +422,8 @@ enum MiloNowPlayingBridge {
     /// Les trois conditions d'une ouverture, lisibles avant d'avoir construit
     /// quoi que ce soit.
     ///
-    /// Extraites pour que `refresh()` puisse poser la question avec le seul
-    /// `is_playing` de `/api/audio/state`, sans payer les deux requêtes de
+    /// Extraites pour que `refresh()` puisse poser la question avec la seule
+    /// `phase` de `/api/audio/state`, sans payer les deux requêtes de
     /// `buildDevices`. Une seule définition : deux réponses divergentes à
     /// « va-t-on ouvrir ? » feraient soit construire pour rien, soit renoncer à
     /// une ouverture légitime.
@@ -552,46 +525,47 @@ enum MiloNowPlayingBridge {
     /// tranché avant d'appeler, et c'est tout l'intérêt : cette fonction coûte
     /// deux requêtes et un dépôt de pochette, et on ne les paie que pour une
     /// session que quelqu'un lira.
-    private static func buildAttributes(from audio: [String: Any]) async -> MiloSessionAttributes {
-        let metadata = audio["metadata"] as? [String: Any]
-        let isPlaying = metadata?["is_playing"] as? Bool ?? false
-
-        // Millisecondes côté Milō, secondes côté framework.
-        let positionMS = metadata?["position"] as? Double ?? 0
-        let durationMS = metadata?["duration"] as? Double ?? 0
+    ///
+    /// Construits comme Milō construit ses notifications (§9, « Notifications
+    /// iOS ») — et c'est la raison d'être de cette fonction : la même session
+    /// reçoit les deux, et deux lectures différentes du même état feraient
+    /// sauter la carte d'une version à l'autre à chaque aller-retour.
+    ///
+    /// - `isPlaying` : `phase == playing`, et rien d'autre — ni le chargement,
+    ///   ni la pause, ni « connecté » ;
+    /// - `elapsedTime` et `timestamp` : l'ancrage tel quel, `position.ms` à
+    ///   l'instant `position.at`. Le système interpole à partir de là, comme
+    ///   la formule du fil. Sans ancrage (radio, reprise seule), `0` et
+    ///   l'heure de construction ;
+    /// - la piste vient de la session, sinon de la reprise :
+    ///   `MiloAudioState.shown`, la règle même qui décide que la carte existe.
+    private static func buildAttributes(from state: MiloAudioState) async -> MiloSessionAttributes {
+        let session = state.session
+        let anchor = session?.position
 
         var track: MiloSessionAttributes.Track?
-        if let metadata, !metadata.isEmpty {
-            // Le modèle de Milō définit un socle commun — title, artist, album,
-            // album_art_url — présenté comme le contrat entre sources. Toutes ne
-            // le remplissent pas : la radio laisse ces quatre champs vides et
-            // fait voyager le morceau en extras (`track_title`, `track_artist`,
-            // `station_name`, `favicon`). D'où cette lecture en cascade, qui ne
-            // nomme aucune source en particulier : elle prend le socle quand il
-            // est là, et se rabat sinon sur les noms observés à côté.
-            //
-            // À retirer le jour où toutes les sources remplissent le socle. Ce
-            // n'est pas une préférence de style : tant qu'elle est là, chaque
-            // client réimplémente la même cascade, ce que le socle existe
-            // justement pour éviter.
-            func first(_ keys: String...) -> String? {
-                for key in keys {
-                    if let value = metadata[key] as? String, !value.isEmpty { return value }
-                }
-                return nil
+        if let shown = state.shown {
+            // « Connecté à X » : l'émetteur est là, mais Milō ne sait pas dire
+            // lecture ou pause. C'est ce que la ligne d'artiste dit alors, avec
+            // les noms que le fil publie pour ça.
+            var artist = shown.artist
+            if session?.phase == .connected, let senders = session?.senders, !senders.isEmpty {
+                artist = String(localized: "connectedTo \(senders.joined(separator: ", "))")
             }
 
-            let title = first("title", "track_title", "station_name")
             track = MiloSessionAttributes.Track(
                 // L'identifiant change avec ce qui est affiché : sans ça, le
                 // système garde la pochette et le titre précédents, faute de
-                // savoir que le contenu a changé.
-                id: (audio["active_source"] as? String ?? "milo") + ":" + (title ?? "-"),
-                title: title,
-                artist: first("artist", "track_artist"),
-                album: first("album", "station_name"),
-                duration: durationMS / 1000,
-                artworkURL: first("album_art_url", "track_artwork", "favicon")
+                // savoir que le contenu a changé. Il porte aussi la source, que
+                // `fireTransport` relit pour adresser ses commandes.
+                id: state.source + ":" + shown.title,
+                title: shown.title,
+                artist: artist,
+                album: shown.album,
+                // Millisecondes côté Milō, secondes côté framework ; une durée
+                // inconnue vaut 0, jamais `nil`.
+                duration: TimeInterval(shown.durationMs ?? 0) / 1000,
+                artworkURL: shown.artwork
             )
 
             // La déposer avant d'annoncer la session : l'extension la lira sur
@@ -607,13 +581,23 @@ enum MiloNowPlayingBridge {
             // `update(_:)` accepte. L'app n'en mint plus aucun — voir
             // `reconcileSession`.
             id: "",
-            isPlaying: isPlaying,
-            elapsedTime: positionMS / 1000,
-            timestamp: ISO8601DateFormatter().string(from: .now),
+            isPlaying: session?.phase == .playing,
+            elapsedTime: anchor.map { TimeInterval($0.ms) / 1000 } ?? 0,
+            timestamp: anchor.map { anchorTimestamp.string(from: Date(timeIntervalSince1970: $0.at)) }
+                ?? anchorTimestamp.string(from: .now),
             currentTrack: track,
             devices: await buildDevices()
         )
     }
+
+    /// Avec la fraction de seconde : l'ancrage de Milō la porte (`at` vaut
+    /// `1790270000.25`), et la jeter décalerait la tête de lecture d'autant.
+    /// `capturedAt` relit les deux formes.
+    private static let anchorTimestamp: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     /// Un device par client snapcast, avec son vrai nom.
     ///

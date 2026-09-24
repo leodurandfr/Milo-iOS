@@ -71,11 +71,15 @@ extension MiloAPIClient {
     /// L'appelant connaît déjà la source — les attributs de session la portent
     /// dans `currentTrack.id`, sous la forme `<source>:<titre>`. On ne relit ici
     /// que lorsqu'il n'en a aucune à donner.
+    ///
+    /// Lue par le décodeur partagé, comme partout ailleurs : un état que cette
+    /// version ne sait pas lire ne nomme aucune source, et la commande n'est
+    /// pas envoyée plutôt qu'adressée au hasard.
     private static func activeSource() async -> String? {
         guard let data = try? await get(path: "/api/audio/state", timeout: sourceReadTimeout),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+              let state = try? MiloAudioState.decode(data)
         else { return nil }
-        return json["active_source"] as? String
+        return state.source
     }
 
     /// Délai d'une requête partie d'un rappel de commande.
