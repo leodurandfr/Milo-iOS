@@ -361,7 +361,7 @@ struct StationPrimingTests {
 /// L'app ne ferme plus la carte — elle le faisait pour tout état sans titre,
 /// pendant que le push de Milō en gardait une, d'où un Mac qui perdait son
 /// icône dès que l'app était ouverte. Tout état se dessine : ce qu'il nomme,
-/// sinon sa source, sinon Milō ; et seul Milō ferme, au bout de sa grâce.
+/// sinon sa source, sinon Milō ; et seul Milō ferme — aussitôt sur `none`.
 ///
 /// Les payloads sont ceux du §10 du fil, complétés des champs qu'il omet.
 /// Toutes les clés sont présentes, une valeur absente vaut `null`.

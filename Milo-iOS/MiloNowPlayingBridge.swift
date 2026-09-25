@@ -3,15 +3,16 @@ import NowPlaying
 
 /// Ce que montre la carte quand rien ne porte de titre : le nom de la source
 /// sur son icône du dock, et qui émet quand quelqu'un émet — la carte de Milō
-/// quand aucune source n'est choisie.
+/// pour une source que la table ne connaît pas, et pour `none` le temps que
+/// le `end` de Milō arrive.
 ///
 /// **L'app ne ferme plus jamais la carte.** Elle le faisait dès que
 /// `MiloAudioState.shown` était vide, pendant que le push de Milō, lui, gardait
 /// une carte — l'icône macOS pour un Mac. D'où un Mac qui avait son icône app
 /// fermée et perdait sa carte app ouverte (constaté le 25/09/2026). Désormais
-/// tout état se dessine, et la carte ne finit que d'une façon : Milō l'arrête
-/// cinq minutes après la fin de la lecture (`SESSION_IDLE_GRACE_S`), `none`
-/// compris — choix de Leo, le 25/09/2026.
+/// tout état se dessine, et seul Milō ferme la carte : aussitôt sur `none`,
+/// cinq minutes après la fin de la lecture sinon (`SESSION_IDLE_GRACE_S`) —
+/// choix de Leo, le 25/09/2026.
 ///
 /// Hors de `MiloNowPlayingBridge`, qui est `@available(iOS 27, *)` : le macro
 /// `@Test` refuse une fonction moins disponible que la cible de test, et la
@@ -262,8 +263,8 @@ enum MiloNowPlayingBridge {
         }
 
         // Il n'y a plus de « rien à montrer » : un état sans titre se dessine en
-        // carte de source, ou de Milō (`MiloSourceCard`), et seul Milō ferme la
-        // carte, au bout de sa grâce.
+        // carte de source (`MiloSourceCard`), et seul Milō ferme la carte —
+        // aussitôt sur `none`, au bout de sa grâce sinon.
 
         // Réconcilier à **chaque** passe, et ici plutôt qu'après la
         // construction.
