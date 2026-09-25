@@ -387,10 +387,11 @@ enum MiloNowPlayingBridge {
     /// n'envoie un `start` que sur un événement de lecture.
     ///
     /// **`isPlaying` reste, et ce n'est pas un oubli depuis que tout état se
-    /// dessine (`MiloSourceCard`).** Milō ouvre lui-même la carte d'une source
-    /// qu'on vient de choisir sans lecture (`_open_idle`), et la ferme au bout
-    /// de cinq minutes — puis refuse de la rouvrir tant que cette source reste
-    /// au repos (`_closed_idle_source`). L'app n'a pas cette mémoire.
+    /// dessine (`MiloSourceCard`).** Ouvrir et ne pas fermer sont deux droits
+    /// distincts, et Milō ne s'accorde que le second : il n'ouvre une carte que
+    /// sur une lecture — l'ouvrir au simple choix d'une source a été essayé le
+    /// 25/09/2026 et retiré, rien n'y était actionnable — et la ferme cinq
+    /// minutes après, aussitôt sur `none`.
     ///
     /// Laisser passer une source arrêtée ici ferait donc rouvrir, deux secondes
     /// plus tard, la carte que Milō vient de fermer — et pour toujours, la
