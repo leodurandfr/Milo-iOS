@@ -1,7 +1,7 @@
 import UIKit
 import WebKit
 
-class ViewController: UIViewController, WKNavigationDelegate {
+class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
 
     var webView: WKWebView!
     var errorView: UIView!
@@ -46,6 +46,7 @@ class ViewController: UIViewController, WKNavigationDelegate {
         // WebView - CHANGEMENTS ICI pour éviter le flickering
         webView = WKWebView()
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         webView.backgroundColor = UIColor(red: 0.97, green: 0.97, blue: 0.97, alpha: 1.0) // ← Changé
         webView.isOpaque = true // ← Changé
         webView.scrollView.backgroundColor = UIColor(red: 0.97, green: 0.97, blue: 0.97, alpha: 1.0) // ← Changé
@@ -307,6 +308,19 @@ class ViewController: UIViewController, WKNavigationDelegate {
         // Connexion échouée - masquer l'overlay de reconnexion et afficher l'erreur
         hideReconnectingOverlay()
         showErrorView()
+    }
+
+    // MARK: - WKUIDelegate
+
+    /// `window.open` venu de la page (ex. la connexion au compte Qobuz) : sans ce
+    /// délégué, WKWebView l'ignore en silence. La page s'ouvre dans le navigateur
+    /// par défaut plutôt que dans la webview, qui perdrait l'interface de Milō.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url {
+            UIApplication.shared.open(url)
+        }
+        return nil
     }
 
     override func viewDidLayoutSubviews() {
