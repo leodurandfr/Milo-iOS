@@ -387,13 +387,13 @@ enum MiloNowPlayingBridge {
     /// n'envoie un `start` que sur un événement de lecture.
     ///
     /// **`isPlaying` reste, et ce n'est pas un oubli depuis que tout état se
-    /// dessine (`MiloSourceCard`).** Ouvrir et ne pas fermer sont deux droits
-    /// distincts, et Milō ne s'accorde que le second : il n'ouvre une carte que
-    /// sur une lecture — l'ouvrir au simple choix d'une source a été essayé le
-    /// 25/09/2026 et retiré, rien n'y était actionnable — et la ferme cinq
-    /// minutes après, aussitôt sur `none`.
+    /// dessine (`MiloSourceCard`).** Tout dessiner n'est pas tout ouvrir : Milō
+    /// n'ouvre une carte que sur une lecture — l'ouvrir au simple choix d'une
+    /// source a été essayé le 25/09/2026 et retiré, rien n'y était actionnable
+    /// — puis la ferme : aussitôt sur `none`, cinq minutes après la fin de la
+    /// lecture sinon. Une source arrêtée n'ouvre donc jamais de carte.
     ///
-    /// Laisser passer une source arrêtée ici ferait donc rouvrir, deux secondes
+    /// Laisser passer une source arrêtée ici ferait rouvrir, deux secondes
     /// plus tard, la carte que Milō vient de fermer — et pour toujours, la
     /// boucle de premier plan n'ayant aucune expiration à elle. Ce serait
     /// reprendre à Milō le cycle de vie que tout ce fichier lui laisse.
