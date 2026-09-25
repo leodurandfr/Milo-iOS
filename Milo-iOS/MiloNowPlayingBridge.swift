@@ -604,8 +604,8 @@ enum MiloNowPlayingBridge {
         )
     }
 
-    /// L'icône macOS du dock, servie par Milō à la taille de l'écran verrouillé.
-    private static let macArtwork = "/api/push/artwork/macos"
+    /// L'icône macOS du dock, un fichier statique de Milō.
+    private static let macArtwork = "/now-playing/macos.jpg"
 
     /// Avec la fraction de seconde : l'ancrage de Milō la porte (`at` vaut
     /// `1790270000.25`), et la jeter décalerait la tête de lecture d'autant.
