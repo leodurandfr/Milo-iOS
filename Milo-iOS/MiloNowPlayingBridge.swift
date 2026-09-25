@@ -391,7 +391,9 @@ enum MiloNowPlayingBridge {
     /// n'ouvre une carte que sur une lecture — l'ouvrir au simple choix d'une
     /// source a été essayé le 25/09/2026 et retiré, rien n'y était actionnable
     /// — puis la ferme : aussitôt sur `none`, cinq minutes après la fin de la
-    /// lecture sinon. Une source arrêtée n'ouvre donc jamais de carte.
+    /// lecture sinon, sans que choisir une autre source relance ce délai. Au
+    /// repos, Milō ne fait au plus que ré-annoncer la carte qu'il tient déjà,
+    /// quand son jeton n'est pas encore arrivé ; il n'en ouvre pas de nouvelle.
     ///
     /// Laisser passer une source arrêtée ici ferait rouvrir, deux secondes
     /// plus tard, la carte que Milō vient de fermer — et pour toujours, la
@@ -399,7 +401,7 @@ enum MiloNowPlayingBridge {
     /// reprendre à Milō le cycle de vie que tout ce fichier lui laisse.
     ///
     /// La carte en pause s'ouvre donc comme avant : pendant que ça jouait. Ce
-    /// qui a changé est qu'elle ne se ferme plus à l'arrêt.
+    /// qui a changé est qu'elle survit cinq minutes à l'arrêt.
     /// Les trois conditions d'une ouverture, lisibles avant d'avoir construit
     /// quoi que ce soit.
     ///
