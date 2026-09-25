@@ -408,76 +408,59 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     // MARK: - Commandes
 
     /// La source que Milō dit jouer, lue dans les attributs plutôt que sur le
-    /// réseau.
-    ///
-    /// Elle voyage dans `currentTrack.id`, sous la forme `<source>:<titre>` —
-    /// c'est le contrat que les deux côtés écrivent déjà : l'app le fabrique
-    /// dans `MiloNowPlayingBridge.buildAttributes`, Milō dans
-    /// `payloads.build_attributes`. Le titre peut contenir des `:`, pas le nom
-    /// de source : on coupe au premier.
-    ///
-    /// Ce qu'elle évite : l'aller-retour `/api/audio/state` que chaque commande
-    /// posait devant son `POST`. Le système n'accorde que trois secondes au
-    /// rappel, et deux requêtes n'y tiennent pas — voir `activeSource()`.
-    ///
-    /// `nil` quand aucune piste n'est annoncée ; l'appelant relit alors, comme
-    /// avant.
-    /// Deux valeurs ne nomment aucune source et rendent `nil` plutôt que de
-    /// partir sur le réseau : `milo`, le bouchon que
-    /// `MiloNowPlayingBridge.buildAttributes` écrit quand `/api/audio/state`
-    /// n'annonce pas de source, et `none`, la façon dont Milō dit lui-même que
-    /// rien ne joue. Les laisser passer frappait
-    /// `/api/audio/control/milo`, une route qui n'existe pas, et la trace
-    /// disait « envoyé » pour une commande qui ne pouvait pas aboutir.
+    /// réseau : `currentTrack.id`, sous la forme `<source>:<titre>`
+    /// (`MiloTrackID`). `nil` pour `none`, et quand aucune piste n'est
+    /// annoncée — tous les boutons sont alors désactivés.
     private var knownSource: String? {
-        guard let id = attributes.currentTrack?.id,
-              let separator = id.firstIndex(of: ":"), separator > id.startIndex
-        else { return nil }
-        let source = String(id[id.startIndex..<separator])
-        return source == "milo" || source == "none" ? nil : source
+        attributes.currentTrack.flatMap { MiloTrackID.source(of: $0.id) }
     }
 
     var commands: [MediaCommand] {
         let source = knownSource
         let playing = attributes.isPlaying
-        // `nil` : un Milō qui n'envoie pas encore la liste — tout reste actif,
-        // comme avant. Sinon un bouton n'est actif que si Milō accepte sa
-        // commande à cet instant : Qobuz et un Mac n'en prennent aucune, Tidal
-        // pas `seek`, et chacune d'elles répondait 400 (mesuré le 25/09/2026).
-        let controls = attributes.controls
-        func offers(_ command: MiloAPIClient.TransportCommand) -> Bool {
-            guard let controls else { return true }
-            guard let name = command.name(forSource: source ?? "") else { return false }
+        let controls = attributes.controls ?? []
+
+        // **Une seule règle** : un bouton est actif si et seulement si Milō
+        // liste sa commande à cet instant pour cette source. Qobuz et un Mac
+        // n'en prennent aucune, Tidal pas `seek`, et chacune répondait 400
+        // (mesuré le 25/09/2026) ; sans session, Milō et l'app ne laissent que
+        // la reprise (`lock_screen_controls`). Sans source connue, ou sans la
+        // liste, rien n'est actif : `enabled(_:)` dit au système ce que ces
+        // commandes ne peuvent pas faire au lieu de le lui laisser découvrir
+        // en appelant un rappel qui sort aussitôt. Une commande désactivée
+        // reste affichée — sauf −15 / +30, voir `steps`.
+        func lists(_ name: String?) -> Bool {
+            guard source != nil, let name else { return false }
             return controls.contains(name)
         }
+        func offers(_ command: MiloAPIClient.ControlCommand) -> Bool {
+            lists(source.flatMap(command.name(forSource:)))
+        }
+        func fire(_ command: MiloAPIClient.ControlCommand) async {
+            await MiloAPIClient.fire(command, source: source)
+        }
+
         // Le bouton unique lecture/pause envoie ce que l'état appelle : `pause`
         // quand ça joue, sinon `resume` (`stop` et `resume_playback` en radio).
         // `playpause` n'existe que chez Spotify ; ailleurs, il était refusé.
-        let toggle: MiloAPIClient.TransportCommand = playing ? .pause : .play
+        let toggle = MiloAPIClient.ControlCommand.transport(playing ? .pause : .play)
         miloLog.info("commands lu — source \(source ?? "inconnue", privacy: .public)")
         return [
             .play {
                 miloLog.info("RAPPEL COMMANDE play")
-                await MiloAPIClient.fireTransport(.play, source: source)
+                await fire(.transport(.play))
             }
-                .enabled(offers(.play)),
-            .pause { await MiloAPIClient.fireTransport(.pause, source: source) }
-                .enabled(offers(.pause)),
-
-            // `enabled(_:)` dit au système ce que ces commandes ne peuvent pas
-            // faire, au lieu de le lui laisser découvrir en appelant un rappel
-            // qui sort aussitôt. Une commande désactivée reste affichée — c'est
-            // le contrat de la documentation — mais son rappel n'est pas invoqué.
-            .togglePlayPause { await MiloAPIClient.fireTransport(toggle, source: source) }
+                .enabled(offers(.transport(.play))),
+            .pause { await fire(.transport(.pause)) }
+                .enabled(offers(.transport(.pause))),
+            .togglePlayPause { await fire(toggle) }
                 .enabled(offers(toggle)),
-        ] + steps(source: source, controls: controls, offers: offers) + [
-            // Un flux n'a pas de tête de lecture à déplacer, et une source sans
-            // `seek` (Tidal) ne le fait pas non plus.
-            .seekToPosition { position in
-                await MiloAPIClient.fireSeek(toSeconds: position, source: source)
-            }
-                .enabled((attributes.currentTrack?.duration ?? 0) > 0
-                         && (controls?.contains("seek") ?? true))
+        ] + steps(isPodcast: source == "podcast", skips: lists(MiloAPIClient.ControlCommand.skipName),
+                  offers: offers, fire: fire) + [
+            // Un flux n'a pas de tête de lecture à déplacer.
+            .seekToPosition { position in await fire(.seek(to: position)) }
+                .enabled(lists(MiloAPIClient.ControlCommand.seekName)
+                         && (attributes.currentTrack?.duration ?? 0) > 0)
         ]
     }
 
@@ -490,33 +473,24 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// **iOS ne dessine −15 / +30 que s'ils sont actifs.** Désactivés, il
     /// affiche à leur place les flèches précédent / suivant, grisées — constaté
     /// le 25/09/2026 sur une carte de podcast au repos, les −15 / +30 revenant
-    /// dès la lecture. Ils sont désactivés dès qu'aucune session n'est en
-    /// cours : Milō et l'app ne laissent alors dans `controls` que la reprise
-    /// (`lock_screen_controls`, `MiloSourceCard.lockScreenControls`).
-    ///
-    /// `skip` n'a pas de repli « tout actif » quand `controls` manque : un Milō
-    /// qui n'envoie pas la liste ne connaît pas non plus la commande.
+    /// dès la lecture.
     private func steps(
-        source: String?, controls: [String]?,
-        offers: (MiloAPIClient.TransportCommand) -> Bool
+        isPodcast: Bool, skips: Bool,
+        offers: (MiloAPIClient.ControlCommand) -> Bool,
+        fire: @escaping (MiloAPIClient.ControlCommand) async -> Void
     ) -> [MediaCommand] {
-        guard source == "podcast" else {
+        guard isPodcast else {
             return [
-                .next { await MiloAPIClient.fireTransport(.next, source: source) }
-                    .enabled(offers(.next)),
-                .previous { await MiloAPIClient.fireTransport(.previous, source: source) }
-                    .enabled(offers(.previous)),
+                .next { await fire(.transport(.next)) }
+                    .enabled(offers(.transport(.next))),
+                .previous { await fire(.transport(.previous)) }
+                    .enabled(offers(.transport(.previous))),
             ]
         }
-        let skips = controls?.contains("skip") ?? false
         return [
-            .skipBackward(preferredIntervals: [15]) { interval in
-                await MiloAPIClient.fireSkip(seconds: -interval, source: source)
-            }
+            .skipBackward(preferredIntervals: [15]) { interval in await fire(.skip(by: -interval)) }
                 .enabled(skips),
-            .skipForward(preferredIntervals: [30]) { interval in
-                await MiloAPIClient.fireSkip(seconds: interval, source: source)
-            }
+            .skipForward(preferredIntervals: [30]) { interval in await fire(.skip(by: interval)) }
                 .enabled(skips),
         ]
     }

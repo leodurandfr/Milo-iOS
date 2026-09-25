@@ -2,6 +2,26 @@ import CoreGraphics
 import Foundation
 import ImageIO
 
+/// L'identifiant de piste des cartes : `<source>:<titre>`.
+///
+/// Milō l'écrit de son côté (`payloads.build_attributes`), l'app du sien
+/// (`MiloNowPlayingBridge.buildAttributes`), et l'extension en relit la source
+/// pour adresser chaque commande. C'est désormais le **seul** lien entre un
+/// bouton et la source qui le reçoit — d'où une seule définition, testée.
+enum MiloTrackID {
+    static func make(source: String, title: String) -> String {
+        source + ":" + title
+    }
+
+    /// La source que l'identifiant nomme ; `nil` pour `none`, qui ne reçoit
+    /// aucune commande, et pour un identifiant sans préfixe.
+    static func source(of id: String) -> String? {
+        guard let separator = id.firstIndex(of: ":"), separator > id.startIndex else { return nil }
+        let source = String(id[id.startIndex..<separator])
+        return source == "none" ? nil : source
+    }
+}
+
 /// Ce que l'écran verrouillé renvoie vers Milō.
 ///
 /// Tout part en HTTP sur le LAN. APNs ne porte que l'état descendant : rien de
@@ -52,34 +72,72 @@ extension MiloAPIClient {
         }
     }
 
-    /// Source active du moment, telle que `/api/audio/state` la nomme.
+    /// Ce que l'écran verrouillé envoie à Milō : une commande de transport, un
+    /// déplacement absolu de la tête de lecture, ou un saut relatif.
     ///
-    /// `/api/audio/control/{source}` s'adresse à une source précise : il n'existe
-    /// pas de « commande au système ».
-    ///
-    /// **Chemin de repli, plus le chemin nominal.** Cet aller-retour-là était
-    /// posé devant chaque commande, et c'est lui qui les faisait échouer :
-    /// `mediaremoted` accorde trois secondes à un rappel de commande (mesuré le
-    /// 19/09/2026 — `Completed command (3.0s)`, puis `Allowing extra 1.0s`), et
-    /// deux requêtes de trois secondes chacune n'y tiennent pas. Quand la
-    /// résolution mDNS de `milo.local` partait scopée sur la mauvaise interface
-    /// — `getaddrinfo start -- ifindex: 12`, jamais de réponse, contre 2 à 33 ms
-    /// pour `ifindex: 0` — celle-ci consommait le budget entier et le `POST` ne
-    /// partait jamais. Play échouait, Pause passait, sans rien qui les
-    /// distingue : une course, perdue une fois sur deux.
-    ///
-    /// L'appelant connaît déjà la source — les attributs de session la portent
-    /// dans `currentTrack.id`, sous la forme `<source>:<titre>`. On ne relit ici
-    /// que lorsqu'il n'en a aucune à donner.
-    ///
-    /// Lue par le décodeur partagé, comme partout ailleurs : un état que cette
-    /// version ne sait pas lire ne nomme aucune source, et la commande n'est
-    /// pas envoyée plutôt qu'adressée au hasard.
-    private static func activeSource() async -> String? {
-        guard let data = try? await get(path: "/api/audio/state", timeout: sourceReadTimeout),
-              let state = try? MiloAudioState.decode(data)
-        else { return nil }
-        return state.source
+    /// Un seul type, pour que le nom qu'active un bouton (`name(forSource:)`,
+    /// comparé à `controls`) et le nom qui part sur le réseau (`body`) ne
+    /// puissent pas diverger.
+    enum ControlCommand {
+        case transport(TransportCommand)
+        /// Milō attend des millisecondes ; le système, lui, raisonne en secondes.
+        case seek(to: TimeInterval)
+        /// Signé : les boutons −15 / +30 du podcast.
+        case skip(by: TimeInterval)
+
+        /// Les noms de `seek` et `skip` ne dépendent ni de la source ni de la
+        /// valeur : l'extension les demande sans fabriquer de commande.
+        static let seekName = "seek"
+        static let skipName = "skip"
+
+        /// Le nom exact que Milō donne à cette commande pour `source` — celui
+        /// que `controls` liste. `nil` : elle n'a pas d'équivalent là.
+        func name(forSource source: String) -> String? {
+            switch self {
+            case .transport(let command): return command.name(forSource: source)
+            case .seek: return Self.seekName
+            case .skip: return Self.skipName
+            }
+        }
+
+        /// `nil` aussi pour une valeur non finie : `Int(.nan * 1000)` fait
+        /// planter le processus, et `JSONSerialization` lève une exception
+        /// Objective-C sur un `Double` infini.
+        fileprivate func body(forSource source: String) -> [String: Any]? {
+            guard let name = name(forSource: source) else { return nil }
+            switch self {
+            case .transport:
+                return ["command": name]
+            case .seek(let position):
+                guard position.isFinite else { return nil }
+                return ["command": name, "data": ["position_ms": Int(position * 1000)]]
+            case .skip(let seconds):
+                guard seconds.isFinite else { return nil }
+                return ["command": name, "data": ["seconds": seconds]]
+            }
+        }
+
+        /// Rejouer après un délai dépassé donne-t-il le même résultat ?
+        ///
+        /// Un `seek` porte une position absolue : le rejouer vise le même point.
+        /// Un `skip` est relatif, comme Milō l'attend — deux appuis rapprochés
+        /// s'additionnent là où un `seek` calculé depuis le dernier ancrage
+        /// viserait deux fois la même seconde — et un +30 dont seule la réponse
+        /// s'est perdue ferait donc sauter 60 s pour un seul appui.
+        fileprivate var isIdempotent: Bool {
+            switch self {
+            case .transport(let command): return command.isIdempotent
+            case .seek: return true
+            case .skip: return false
+            }
+        }
+
+        fileprivate func label(forSource source: String) -> String {
+            switch self {
+            case .skip(let seconds): return "skip \(Int(seconds))"
+            default: return name(forSource: source) ?? "\(self)"
+            }
+        }
     }
 
     /// Délai d'une requête partie d'un rappel de commande.
@@ -90,91 +148,37 @@ extension MiloAPIClient {
     /// une trace et un silence.
     static let commandTimeout: TimeInterval = 2.5
 
-    /// Ce qu'on accorde à la relecture de la source, quand l'appelant n'en
-    /// connaît aucune.
+    /// Envoie une commande à la source qui la reçoit.
     ///
-    /// Elle précède le POST au lieu de le remplacer : les deux délais
-    /// s'additionnent, et deux fois `commandTimeout` faisait cinq secondes dans
-    /// un budget de trois — le repli ne pouvait pas aboutir précisément dans le
-    /// cas pour lequel il existe. Ce qu'on retire ici est retiré du POST qui
-    /// suit, de sorte que la somme reste sous `commandTimeout`.
-    static let sourceReadTimeout: TimeInterval = 1
-
-    /// Envoie une commande de transport. Sans effet si aucune source n'est active.
+    /// `/api/audio/control/{source}` s'adresse à une source précise : il n'existe
+    /// pas de « commande au système ». **La source vient de l'appelant, jamais
+    /// d'une relecture de `/api/audio/state`.** Relire la faisait échouer :
+    /// `mediaremoted` accorde trois secondes à un rappel de commande (mesuré le
+    /// 19/09/2026 — `Completed command (3.0s)`), et quand la résolution mDNS
+    /// partait sur la mauvaise interface cet aller-retour consommait tout le
+    /// budget. Il était devenu un repli pour une carte qui ne nommait pas sa
+    /// source ; depuis que chacune la porte (`MiloTrackID`), et qu'un bouton
+    /// n'est actif que si `controls` liste sa commande, ce repli n'était plus
+    /// jamais atteint, et il a été retiré le 25/09/2026.
     ///
-    /// `source` est celle que l'appelant connaît déjà ; `nil` déclenche la
-    /// relecture, qui coûte un aller-retour et le budget qui va avec.
-    ///
-    /// Une unité qui ne connaît pas encore `next`/`prev` en radio répond HTTP
-    /// 400 : un refus propre. Il est désormais consigné — un bouton qui ne fait
-    /// rien ne disait pas s'il avait été refusé, s'il avait expiré, ou s'il
-    /// n'était jamais parti, et ce sont trois corrections différentes.
-    static func fireTransport(_ command: TransportCommand, source: String? = nil) async {
-        // `??` prend son côté droit en autoclosure, qui ne peut rien attendre :
-        // la relecture s'écrit donc en clair.
-        var resolved = source
-        var budget = commandTimeout
-        if resolved == nil {
-            resolved = await activeSource()
-            budget -= sourceReadTimeout
-        }
-        guard let source = resolved else {
-            noteCommand("\(command) : aucune source active")
+    /// Une unité qui refuse la commande répond HTTP 400 : un refus propre, et
+    /// consigné — un bouton qui ne fait rien ne disait pas s'il avait été
+    /// refusé, s'il avait expiré, ou s'il n'était jamais parti.
+    static func fire(_ command: ControlCommand, source: String?) async {
+        guard let source else {
+            noteCommand("\(command) : aucune source connue")
             return
         }
-        guard let name = command.name(forSource: source) else {
+        guard let body = command.body(forSource: source) else {
             noteCommand("\(command) : sans équivalent en \(source)")
             return
         }
-        let body = try? JSONSerialization.data(withJSONObject: ["command": name])
-        await sendControl(source: source, body: body, label: name, timeout: budget,
-                          retryable: command.isIdempotent)
-    }
-
-    /// Déplace la tête de lecture. Milō attend des millisecondes ; le système,
-    /// lui, raisonne en secondes.
-    static func fireSeek(toSeconds position: TimeInterval, source: String? = nil) async {
-        var resolved = source
-        var budget = commandTimeout
-        if resolved == nil {
-            resolved = await activeSource()
-            budget -= sourceReadTimeout
-        }
-        guard let source = resolved, source != "radio" else { return }
-        let body = try? JSONSerialization.data(withJSONObject: [
-            "command": "seek",
-            "data": ["position_ms": Int(position * 1000)]
-        ])
-        // Un `seek` porte une position absolue : le rejouer vise le même point.
-        await sendControl(source: source, body: body, label: "seek", timeout: budget,
-                          retryable: true)
-    }
-
-    /// Avance ou recule la tête de lecture de `seconds` (signé) : les boutons
-    /// −15 / +30 du podcast.
-    ///
-    /// Relatif, comme Milō l'attend (`skip`, `{"seconds": …}`) : deux appuis
-    /// rapprochés s'additionnent côté Milō, là où un `seek` calculé depuis le
-    /// dernier ancrage viserait deux fois la même seconde. Et donc **jamais
-    /// rejoué** : un `skip` de +30 dont seule la réponse s'est perdue ferait
-    /// sauter 60 s pour un seul appui.
-    static func fireSkip(seconds: TimeInterval, source: String? = nil) async {
-        var resolved = source
-        var budget = commandTimeout
-        if resolved == nil {
-            resolved = await activeSource()
-            budget -= sourceReadTimeout
-        }
-        guard let source = resolved else {
-            noteCommand("skip : aucune source active")
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else {
+            noteCommand("\(command) → \(source) : corps illisible")
             return
         }
-        let body = try? JSONSerialization.data(withJSONObject: [
-            "command": "skip",
-            "data": ["seconds": seconds]
-        ])
-        await sendControl(source: source, body: body, label: "skip \(Int(seconds))",
-                          timeout: budget, retryable: false)
+        await sendControl(source: source, body: data, label: command.label(forSource: source),
+                          retryable: command.isIdempotent)
     }
 
     /// L'envoi lui-même, tracé à l'entrée comme à la sortie.
@@ -182,9 +186,9 @@ extension MiloAPIClient {
     /// Tracer seulement le succès ne prouve rien : c'est ce qui a fait conclure
     /// deux fois « la fermeture n'est jamais appelée » alors qu'elle l'était et
     /// mourait en route.
-    private static func sendControl(source: String, body: Data?, label: String,
-                                    timeout: TimeInterval = commandTimeout,
+    private static func sendControl(source: String, body: Data, label: String,
                                     retryable: Bool) async {
+        let timeout = commandTimeout
         guard let url = URL(string: baseURL() + "/api/audio/control/\(source)") else {
             noteCommand("\(label) → \(source) : URL inconstructible")
             return
@@ -195,10 +199,8 @@ extension MiloAPIClient {
         request.httpMethod = "POST"
         request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        if let body {
-            request.httpBody = body
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         // La requête est faite ici plutôt que par `post(path:)`, qui jette la
         // réponse : un 400 — le refus qu'une unité oppose à une commande qu'elle
@@ -220,10 +222,8 @@ extension MiloAPIClient {
         //   appui. Seules les commandes dont le résultat ne dépend pas du
         //   nombre de fois qu'on les envoie sont rejouées.
         // - **le budget**, parce que deux tentatives trop courtes échouent là
-        //   où une seule aboutissait. `fireTransport` retire déjà
-        //   `sourceReadTimeout` quand il a dû relire la source : couper en deux
-        //   ce qui reste donnerait 750 ms par essai. En dessous du seuil, on
-        //   garde une seule tentative longue.
+        //   où une seule aboutissait. En dessous du seuil, on garde une seule
+        //   tentative longue.
         //
         // Un `HTTP 400` n'est jamais rejoué non plus : c'est le refus d'une
         // source à une commande qu'elle ne connaît pas, et le répéter ne ferait

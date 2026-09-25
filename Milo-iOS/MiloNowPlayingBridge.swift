@@ -549,8 +549,8 @@ enum MiloNowPlayingBridge {
                 // L'identifiant change avec ce qui est affiché : sans ça, le
                 // système garde la pochette et le titre précédents, faute de
                 // savoir que le contenu a changé. Il porte aussi la source, que
-                // `fireTransport` relit pour adresser ses commandes.
-                id: state.source + ":" + shown.title,
+                // l'extension relit pour adresser ses commandes (`MiloTrackID`).
+                id: MiloTrackID.make(source: state.source, title: shown.title),
                 title: shown.title,
                 artist: artist,
                 album: shown.album,
@@ -570,7 +570,7 @@ enum MiloNowPlayingBridge {
             // source au repos, aucune source : sa carte, comme le push de Milō.
             let card = MiloSourceCard.card(for: state)
             track = MiloSessionAttributes.Track(
-                id: state.source + ":" + card.title,
+                id: MiloTrackID.make(source: state.source, title: card.title),
                 title: card.title,
                 artist: card.artist,
                 album: nil,

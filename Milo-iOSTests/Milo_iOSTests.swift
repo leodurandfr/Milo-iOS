@@ -470,3 +470,43 @@ struct NowPlayingSourceCardTests {
         #expect("\(MiloSourceCard.milo.title)|\(MiloSourceCard.milo.icon)" == "Milō|milo")
     }
 }
+
+/// Le seul lien entre un bouton de l'écran verrouillé et la source qui reçoit
+/// sa commande : la source relue dans `currentTrack.id`. Milō l'écrit
+/// `f"{source}:{title}"` (`payloads.build_attributes`), l'app par
+/// `MiloTrackID.make` — et l'extension n'a plus de relecture réseau pour
+/// rattraper un identifiant qu'elle lirait mal.
+struct TrackIDTests {
+
+    @Test("Chaque source se relit dans l'identifiant, même quand le titre porte des « : »")
+    func everySourceRoundTrips() {
+        for source in MiloSourceCard.sources.keys {
+            #expect(MiloTrackID.source(of: MiloTrackID.make(source: source, title: "Artiste: Titre")) == source)
+        }
+    }
+
+    @Test("L'identifiant qu'écrit Milō se relit pareil")
+    func milosSpellingReadsTheSame() {
+        #expect(MiloTrackID.source(of: "podcast:Podcasts") == "podcast")
+        #expect(MiloTrackID.source(of: "radio:FIP: Jazz") == "radio")
+    }
+
+    @Test("Aucune source ne reçoit de commande : `none`, un identifiant sans préfixe")
+    func nothingAddressesNoSource() {
+        #expect(MiloTrackID.source(of: "none:Milō") == nil)
+        #expect(MiloTrackID.source(of: "sans préfixe") == nil)
+        #expect(MiloTrackID.source(of: ":titre") == nil)
+    }
+
+    @Test("Le nom qui active un bouton est celui que Milō liste dans `controls`")
+    func commandNamesMatchControls() {
+        typealias C = MiloAPIClient.ControlCommand
+        #expect(C.transport(.play).name(forSource: "radio") == "resume_playback")
+        #expect(C.transport(.pause).name(forSource: "radio") == "stop")
+        #expect(C.transport(.playPause).name(forSource: "radio") == nil)
+        #expect(C.transport(.play).name(forSource: "podcast") == "resume")
+        #expect(C.transport(.previous).name(forSource: "spotify") == "prev")
+        #expect(C.seek(to: 12).name(forSource: "podcast") == "seek")
+        #expect(C.skip(by: -15).name(forSource: "podcast") == "skip")
+    }
+}
