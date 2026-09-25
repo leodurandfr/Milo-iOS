@@ -44,7 +44,15 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         self.view = containerView
 
         // WebView - CHANGEMENTS ICI pour éviter le flickering
-        webView = WKWebView()
+        // Un `window.open` qui suit un `await` n'a plus de geste de l'utilisateur
+        // derrière lui, et iOS le bloque par défaut avant même d'appeler le
+        // délégué — c'est le cas de « Se connecter » dans Réglages → Qobuz, qui
+        // demande l'URL à Milō avant d'ouvrir. La contrepartie, une page qui
+        // ouvre sans qu'on ait touché, est bornée par `createWebViewWith` : rien
+        // d'autre que du web, et toujours dans le navigateur.
+        let configuration = WKWebViewConfiguration()
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
+        webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.backgroundColor = UIColor(red: 0.97, green: 0.97, blue: 0.97, alpha: 1.0) // ← Changé
@@ -317,7 +325,10 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
     /// par défaut plutôt que dans la webview, qui perdrait l'interface de Milō.
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = navigationAction.request.url {
+        // Du web seulement : sans geste requis, un `tel:`, un `sms:` ou le
+        // schéma d'une autre app partirait sans qu'on ait touché quoi que ce
+        // soit. `about:blank` n'aurait de toute façon rien à ouvrir.
+        if let url = navigationAction.request.url, ["http", "https"].contains(url.scheme?.lowercased()) {
             UIApplication.shared.open(url)
         }
         return nil
