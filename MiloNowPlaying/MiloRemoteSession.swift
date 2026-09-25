@@ -119,7 +119,7 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         // n'avoir pas encore de métadonnées. Une chaîne vide laisse le système
         // masquer la ligne ; inventer « Inconnu » l'afficherait pour de bon.
         return MusicContent(
-            id: track.id,
+            id: Self.contentID(track),
             songTitle: track.title ?? "",
             artistName: track.artist ?? "",
             albumName: track.album ?? "",
@@ -132,6 +132,30 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             duration: track.duration > 0 ? .finite(track.duration) : .live,
             artwork: cover
         )
+    }
+
+    /// L'identité du contenu pour le système : la piste **et** sa pochette.
+    ///
+    /// Le système ne résout qu'une image par identifiant de contenu. S'il a
+    /// déjà lu ce contenu sans pochette, il ne redemande rien quand l'URL
+    /// arrive sous le même identifiant — et c'est l'ordre normal : Milō publie
+    /// le titre d'abord, avec le logo de la station ou sans image, puis la
+    /// pochette une seconde plus tard, une fois résolue. Le fournisseur n'était
+    /// alors jamais rappelé pour elle (mesuré le 22/09/2026), et la carte
+    /// restait grise ou sur le logo jusqu'à ce que l'app, ouverte,
+    /// reconstruise la session.
+    ///
+    /// Vérifié le 25/09/2026 à 13:56, app endormie : « Annie Rooney » arrive
+    /// avec le logo de Classic Vinyl HD, puis sa pochette `mzstatic` sous le
+    /// même `currentTrack.id` ; le fournisseur est rappelé, la télécharge en
+    /// 83 ms, et la Dynamic Island l'affiche.
+    ///
+    /// Composé ici plutôt que sur le fil : `currentTrack.id` reste ce que Milō
+    /// et l'app écrivent, et `knownSource` le relit tel quel. Seul ce que le
+    /// système voit change, une fois de plus par piste au plus.
+    private static func contentID(_ track: MiloSessionAttributes.Track) -> String {
+        guard let artwork = track.artworkURL else { return track.id }
+        return track.id + "\u{1F}" + artwork
     }
 
     /// La pochette est chargée par l'extension, à la demande du système.
@@ -175,6 +199,12 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             // l'entrée dans ce bloc et le `RBSTerminateRequest`, et dix-sept
             // processus en trois minutes. Tout ce qui est asynchrone doit donc
             // tenir dans ce budget, ou ne jamais répondre.
+            //
+            // **Ce budget ne décrit plus la règle.** Remesuré le 19/09 au soir
+            // puis le 25/09/2026 : un même processus a vécu plus de soixante-dix
+            // minutes, et le repli réseau ci-dessous aboutit en 20 à 83 ms,
+            // app endormie. Les six millisecondes décrivaient des réveils en
+            // rafale. Le cache reste le chemin le plus court, pas le seul.
             //
             // D'où le retrait d'ImageIO du chemin critique : une lecture de
             // fichier suffit, `ArtworkRepresentation(data:)` prend les octets
