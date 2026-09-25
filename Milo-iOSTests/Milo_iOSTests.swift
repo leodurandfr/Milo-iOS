@@ -367,7 +367,7 @@ struct StationPrimingTests {
 /// Toutes les clés sont présentes, une valeur absente vaut `null`.
 struct NowPlayingSourceCardTests {
 
-    private func card(_ partial: String) throws -> MiloSourceCard.Card {
+    private func state(_ partial: String) throws -> MiloAudioState {
         let common: [String: Any] = [
             "switching": false, "service": "running", "service_error": NSNull(),
             "availability": [String: Any](), "controls": [String](),
@@ -377,8 +377,15 @@ struct NowPlayingSourceCardTests {
         let object = try #require(
             try JSONSerialization.jsonObject(with: Data(partial.utf8)) as? [String: Any])
         let merged = common.merging(object) { _, new in new }
-        let state = try MiloAudioState.decode(try JSONSerialization.data(withJSONObject: merged))
-        return MiloSourceCard.card(for: state)
+        return try MiloAudioState.decode(try JSONSerialization.data(withJSONObject: merged))
+    }
+
+    private func card(_ partial: String) throws -> MiloSourceCard.Card {
+        MiloSourceCard.card(for: try state(partial))
+    }
+
+    private func controls(_ partial: String) throws -> [String] {
+        MiloSourceCard.lockScreenControls(for: try state(partial))
     }
 
     @Test("Un Mac nomme la source et qui émet, sous l'icône macOS")
@@ -424,20 +431,6 @@ struct NowPlayingSourceCardTests {
         """).title == "Milō")
     }
 
-    private func controls(_ partial: String) throws -> [String] {
-        let common: [String: Any] = [
-            "switching": false, "service": "running", "service_error": NSNull(),
-            "availability": [String: Any](), "controls": [String](),
-            "session": NSNull(), "resume": NSNull(), "details": NSNull(),
-            "multiroom_enabled": false, "equalizer_effects_enabled": true,
-        ]
-        let object = try #require(
-            try JSONSerialization.jsonObject(with: Data(partial.utf8)) as? [String: Any])
-        let merged = common.merging(object) { _, new in new }
-        let state = try MiloAudioState.decode(try JSONSerialization.data(withJSONObject: merged))
-        return MiloSourceCard.lockScreenControls(for: state)
-    }
-
     @Test("Une station arrêtée n'offre que la reprise, pas les favorites")
     func aStoppedStationOffersOnlyToResume() throws {
         // La radio garde `next`/`prev` à l'arrêt pour parcourir ses favorites ;
@@ -464,12 +457,16 @@ struct NowPlayingSourceCardTests {
         // `SOURCE_CARDS` dans `backend/core/push/payloads.py`. Recopiée ici
         // parce qu'une orthographe différente fait basculer l'écran verrouillé
         // entre la carte du push et celle de l'app à chaque aller-retour.
+        // Le nom et l'icône : l'un comme l'autre, divergents, font changer la
+        // carte à chaque aller-retour.
         let pi: [String: String] = [
-            "spotify": "Spotify", "qobuz": "Qobuz", "tidal": "TIDAL",
-            "airplay": "AirPlay", "bluetooth": "Bluetooth", "mac": "Récepteur macOS",
-            "radio": "Webradio", "podcast": "Podcasts", "music_library": "Bibliothèque",
-            "cd": "Lecteur CD",
+            "spotify": "Spotify|spotify", "qobuz": "Qobuz|qobuz", "tidal": "TIDAL|tidal",
+            "airplay": "AirPlay|airplay", "bluetooth": "Bluetooth|bluetooth",
+            "mac": "Récepteur macOS|macos", "radio": "Webradio|radio",
+            "podcast": "Podcasts|podcast", "music_library": "Bibliothèque|music-library",
+            "cd": "Lecteur CD|cd",
         ]
-        #expect(MiloSourceCard.sources.mapValues(\.title) == pi)
+        #expect(MiloSourceCard.sources.mapValues { "\($0.title)|\($0.icon)" } == pi)
+        #expect("\(MiloSourceCard.milo.title)|\(MiloSourceCard.milo.icon)" == "Milō|milo")
     }
 }
