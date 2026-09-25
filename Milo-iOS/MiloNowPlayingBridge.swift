@@ -51,6 +51,22 @@ enum MiloSourceCard {
     /// `none`, et une source que la table ne connaît pas encore.
     static let milo = (title: "Milō", icon: "milo")
 
+    /// Les commandes qui rendent ce qu'une carte au repos montre — la seule
+    /// chose qu'elle puisse encore offrir.
+    static let resumeCommands: Set<String> = ["resume", "resume_playback"]
+
+    /// Les commandes que l'écran verrouillé peut offrir pour cet état.
+    ///
+    /// Avec une session, ce que la source accepte maintenant. Sans session,
+    /// seulement reprendre ce que la carte nomme : la radio garde `next`/`prev`
+    /// à l'arrêt pour parcourir ses favorites, mais une carte où rien ne joue
+    /// n'offre rien d'autre (demande de Leo, 25/09/2026). La même règle que
+    /// `lock_screen_controls` côté Milō.
+    static func lockScreenControls(for state: MiloAudioState) -> [String] {
+        guard state.session == nil else { return state.controls }
+        return state.controls.filter(resumeCommands.contains)
+    }
+
     static func card(for state: MiloAudioState) -> Card {
         let entry = sources[state.source] ?? milo
         let senders = state.session?.senders ?? []
@@ -573,7 +589,7 @@ enum MiloNowPlayingBridge {
                 ?? anchorTimestamp.string(from: .now),
             currentTrack: track,
             devices: await buildDevices(),
-            controls: state.controls
+            controls: MiloSourceCard.lockScreenControls(for: state)
         )
     }
 

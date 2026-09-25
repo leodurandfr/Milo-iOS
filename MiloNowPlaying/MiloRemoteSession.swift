@@ -470,10 +470,7 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             // le contrat de la documentation — mais son rappel n'est pas invoqué.
             .togglePlayPause { await MiloAPIClient.fireTransport(toggle, source: source) }
                 .enabled(offers(toggle)),
-            .next { await MiloAPIClient.fireTransport(.next, source: source) }
-                .enabled(offers(.next)),
-            .previous { await MiloAPIClient.fireTransport(.previous, source: source) }
-                .enabled(offers(.previous)),
+        ] + steps(source: source, controls: controls, offers: offers) + [
             // Un flux n'a pas de tête de lecture à déplacer, et une source sans
             // `seek` (Tidal) ne le fait pas non plus.
             .seekToPosition { position in
@@ -481,6 +478,46 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             }
                 .enabled((attributes.currentTrack?.duration ?? 0) > 0
                          && (controls?.contains("seek") ?? true))
+        ]
+    }
+
+    /// Les deux boutons autour de lecture/pause.
+    ///
+    /// Le podcast avance par bonds, −15 / +30, comme sur l'écran de Milō ; les
+    /// autres sources changent de piste (ou de station favorite en radio). Un
+    /// seul des deux jeux est déclaré, pour que le système dessine celui-là.
+    ///
+    /// **iOS ne dessine −15 / +30 que s'ils sont actifs.** Désactivés, il
+    /// affiche à leur place les flèches précédent / suivant, grisées — constaté
+    /// le 25/09/2026 sur une carte de podcast au repos, les −15 / +30 revenant
+    /// dès la lecture. Ils sont désactivés dès qu'aucune session n'est en
+    /// cours : Milō et l'app ne laissent alors dans `controls` que la reprise
+    /// (`lock_screen_controls`, `MiloSourceCard.lockScreenControls`).
+    ///
+    /// `skip` n'a pas de repli « tout actif » quand `controls` manque : un Milō
+    /// qui n'envoie pas la liste ne connaît pas non plus la commande.
+    private func steps(
+        source: String?, controls: [String]?,
+        offers: (MiloAPIClient.TransportCommand) -> Bool
+    ) -> [MediaCommand] {
+        guard source == "podcast" else {
+            return [
+                .next { await MiloAPIClient.fireTransport(.next, source: source) }
+                    .enabled(offers(.next)),
+                .previous { await MiloAPIClient.fireTransport(.previous, source: source) }
+                    .enabled(offers(.previous)),
+            ]
+        }
+        let skips = controls?.contains("skip") ?? false
+        return [
+            .skipBackward(preferredIntervals: [15]) { interval in
+                await MiloAPIClient.fireSkip(seconds: -interval, source: source)
+            }
+                .enabled(skips),
+            .skipForward(preferredIntervals: [30]) { interval in
+                await MiloAPIClient.fireSkip(seconds: interval, source: source)
+            }
+                .enabled(skips),
         ]
     }
 

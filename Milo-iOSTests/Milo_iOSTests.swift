@@ -424,6 +424,41 @@ struct NowPlayingSourceCardTests {
         """).title == "Milō")
     }
 
+    private func controls(_ partial: String) throws -> [String] {
+        let common: [String: Any] = [
+            "switching": false, "service": "running", "service_error": NSNull(),
+            "availability": [String: Any](), "controls": [String](),
+            "session": NSNull(), "resume": NSNull(), "details": NSNull(),
+            "multiroom_enabled": false, "equalizer_effects_enabled": true,
+        ]
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: Data(partial.utf8)) as? [String: Any])
+        let merged = common.merging(object) { _, new in new }
+        let state = try MiloAudioState.decode(try JSONSerialization.data(withJSONObject: merged))
+        return MiloSourceCard.lockScreenControls(for: state)
+    }
+
+    @Test("Une station arrêtée n'offre que la reprise, pas les favorites")
+    func aStoppedStationOffersOnlyToResume() throws {
+        // La radio garde `next`/`prev` à l'arrêt pour parcourir ses favorites ;
+        // sur l'écran verrouillé, une carte où rien ne joue n'offre que play.
+        #expect(try controls("""
+        {"source":"radio","controls":["resume_playback","next","prev"],
+         "resume":{"title":"FIP","artist":null,"album":"FIP","artwork":null,
+           "duration_ms":null,"position_ms":null}}
+        """) == ["resume_playback"])
+    }
+
+    @Test("Une session en cours garde toutes ses commandes")
+    func aLiveSessionKeepsItsCommands() throws {
+        #expect(try controls("""
+        {"source":"podcast","controls":["pause","seek","skip","set_speed"],
+         "session":{"id":"9f","phase":"playing","title":"Épisode 12","artist":null,
+           "album":null,"artwork":null,"senders":[],"duration_ms":2400000,
+           "position":{"ms":192000,"at":1790270000.25,"rate":1.0}}}
+        """) == ["pause", "seek", "skip", "set_speed"])
+    }
+
     @Test("La table suit celle de Milō, entrée pour entrée")
     func theTableMatchesMilo() {
         // `SOURCE_CARDS` dans `backend/core/push/payloads.py`. Recopiée ici

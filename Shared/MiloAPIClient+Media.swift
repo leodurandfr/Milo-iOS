@@ -150,6 +150,33 @@ extension MiloAPIClient {
                           retryable: true)
     }
 
+    /// Avance ou recule la tête de lecture de `seconds` (signé) : les boutons
+    /// −15 / +30 du podcast.
+    ///
+    /// Relatif, comme Milō l'attend (`skip`, `{"seconds": …}`) : deux appuis
+    /// rapprochés s'additionnent côté Milō, là où un `seek` calculé depuis le
+    /// dernier ancrage viserait deux fois la même seconde. Et donc **jamais
+    /// rejoué** : un `skip` de +30 dont seule la réponse s'est perdue ferait
+    /// sauter 60 s pour un seul appui.
+    static func fireSkip(seconds: TimeInterval, source: String? = nil) async {
+        var resolved = source
+        var budget = commandTimeout
+        if resolved == nil {
+            resolved = await activeSource()
+            budget -= sourceReadTimeout
+        }
+        guard let source = resolved else {
+            noteCommand("skip : aucune source active")
+            return
+        }
+        let body = try? JSONSerialization.data(withJSONObject: [
+            "command": "skip",
+            "data": ["seconds": seconds]
+        ])
+        await sendControl(source: source, body: body, label: "skip \(Int(seconds))",
+                          timeout: budget, retryable: false)
+    }
+
     /// L'envoi lui-même, tracé à l'entrée comme à la sortie.
     ///
     /// Tracer seulement le succès ne prouve rien : c'est ce qui a fait conclure
