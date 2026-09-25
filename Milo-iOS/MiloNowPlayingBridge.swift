@@ -573,6 +573,19 @@ enum MiloNowPlayingBridge {
             if let artwork = track?.artworkURL {
                 await MiloAPIClient.cacheArtwork(from: artwork)
             }
+        } else if state.source == "mac", let senders = session?.senders, !senders.isEmpty {
+            // Un Mac envoie un flux, pas des pistes : la carte nomme qui émet,
+            // sous l'icône macOS du dock — ce que le push de Milō envoie aussi.
+            let title = senders.joined(separator: ", ")
+            track = MiloSessionAttributes.Track(
+                id: state.source + ":" + title,
+                title: title,
+                artist: nil,
+                album: nil,
+                duration: 0,
+                artworkURL: macArtwork
+            )
+            await MiloAPIClient.cacheArtwork(from: macArtwork)
         }
 
         return MiloSessionAttributes(
@@ -586,9 +599,13 @@ enum MiloNowPlayingBridge {
             timestamp: anchor.map { anchorTimestamp.string(from: Date(timeIntervalSince1970: $0.at)) }
                 ?? anchorTimestamp.string(from: .now),
             currentTrack: track,
-            devices: await buildDevices()
+            devices: await buildDevices(),
+            controls: state.controls
         )
     }
+
+    /// L'icône macOS du dock, servie par Milō à la taille de l'écran verrouillé.
+    private static let macArtwork = "/api/push/artwork/macos.jpg"
 
     /// Avec la fraction de seconde : l'ancrage de Milō la porte (`at` vaut
     /// `1790270000.25`), et la jeter décalerait la tête de lecture d'autant.

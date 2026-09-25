@@ -406,38 +406,48 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
 
     var commands: [MediaCommand] {
         let source = knownSource
+        let playing = attributes.isPlaying
+        // `nil` : un Milō qui n'envoie pas encore la liste — tout reste actif,
+        // comme avant. Sinon un bouton n'est actif que si Milō accepte sa
+        // commande à cet instant : Qobuz et un Mac n'en prennent aucune, Tidal
+        // pas `seek`, et chacune d'elles répondait 400 (mesuré le 25/09/2026).
+        let controls = attributes.controls
+        func offers(_ command: MiloAPIClient.TransportCommand) -> Bool {
+            guard let controls else { return true }
+            guard let name = command.name(forSource: source ?? "") else { return false }
+            return controls.contains(name)
+        }
+        // Le bouton unique lecture/pause envoie ce que l'état appelle : `pause`
+        // quand ça joue, sinon `resume` (`stop` et `resume_playback` en radio).
+        // `playpause` n'existe que chez Spotify ; ailleurs, il était refusé.
+        let toggle: MiloAPIClient.TransportCommand = playing ? .pause : .play
         miloLog.info("commands lu — source \(source ?? "inconnue", privacy: .public)")
         return [
             .play {
                 miloLog.info("RAPPEL COMMANDE play")
                 await MiloAPIClient.fireTransport(.play, source: source)
-            },
-            .pause { await MiloAPIClient.fireTransport(.pause, source: source) },
+            }
+                .enabled(offers(.play)),
+            .pause { await MiloAPIClient.fireTransport(.pause, source: source) }
+                .enabled(offers(.pause)),
 
-            // `enabled(_:)` dit au système ce que ces deux-là ne peuvent pas
+            // `enabled(_:)` dit au système ce que ces commandes ne peuvent pas
             // faire, au lieu de le lui laisser découvrir en appelant un rappel
-            // qui sort aussitôt.
-            //
-            // Une commande désactivée reste affichée — c'est le contrat de la
-            // documentation — mais son rappel n'est pas invoqué. Ça ne change
-            // donc rien à ce qu'on voit, et ça évite un aller-retour qui
-            // n'aboutirait nulle part : sur un rappel à qui le système accorde
-            // trois secondes, ne pas être appelé vaut mieux que l'être pour
-            // rien.
-            //
-            // `playpause` n'a pas d'équivalent en radio — `name(forSource:)`
-            // rend `nil` — et un flux n'a pas de tête de lecture à déplacer :
-            // `fireSeek` sortait déjà sans rien envoyer. Source inconnue, les
-            // deux restent actives : c'est `nil`, pas « radio », et le repli
-            // saura relire ce qu'il faut.
-            .togglePlayPause { await MiloAPIClient.fireTransport(.playPause, source: source) }
-                .enabled(source != "radio"),
-            .next { await MiloAPIClient.fireTransport(.next, source: source) },
-            .previous { await MiloAPIClient.fireTransport(.previous, source: source) },
+            // qui sort aussitôt. Une commande désactivée reste affichée — c'est
+            // le contrat de la documentation — mais son rappel n'est pas invoqué.
+            .togglePlayPause { await MiloAPIClient.fireTransport(toggle, source: source) }
+                .enabled(offers(toggle)),
+            .next { await MiloAPIClient.fireTransport(.next, source: source) }
+                .enabled(offers(.next)),
+            .previous { await MiloAPIClient.fireTransport(.previous, source: source) }
+                .enabled(offers(.previous)),
+            // Un flux n'a pas de tête de lecture à déplacer, et une source sans
+            // `seek` (Tidal) ne le fait pas non plus.
             .seekToPosition { position in
                 await MiloAPIClient.fireSeek(toSeconds: position, source: source)
             }
-                .enabled((attributes.currentTrack?.duration ?? 0) > 0)
+                .enabled((attributes.currentTrack?.duration ?? 0) > 0
+                         && (controls?.contains("seek") ?? true))
         ]
     }
 

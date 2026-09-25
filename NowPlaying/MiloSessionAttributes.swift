@@ -21,6 +21,9 @@ import NowPlaying
 /// - toujours présents : `id`, `isPlaying`, `elapsedTime`, `devices`, et
 ///   `duration` quand une piste est là — une durée inconnue vaut `0.0`, jamais
 ///   `null`.
+/// - optionnel : `controls`, les commandes que la source accepte à cet instant.
+///   Un Milō plus ancien ne l'envoie pas, et son absence laisse tous les
+///   boutons actifs, comme avant.
 @available(iOS 27, *)
 struct MiloSessionAttributes: RemoteMediaSessionAttributes {
 
@@ -31,6 +34,11 @@ struct MiloSessionAttributes: RemoteMediaSessionAttributes {
     let timestamp: String
     let currentTrack: Track?
     let devices: [Device]
+    /// Les noms exacts des commandes que Milō accepte maintenant (`pause`,
+    /// `resume`, `next`, `prev`, `seek`, `stop`, `resume_playback`…). Qobuz et
+    /// un Mac n'en prennent aucune, Tidal pas `seek` : un bouton hors de cette
+    /// liste répondait 400 (mesuré le 25/09/2026).
+    let controls: [String]?
 
     struct Track: Codable {
         let id: String
@@ -76,7 +84,8 @@ struct MiloSessionAttributes: RemoteMediaSessionAttributes {
             elapsedTime: elapsedTime,
             timestamp: timestamp,
             currentTrack: currentTrack,
-            devices: devices
+            devices: devices,
+            controls: controls
         )
     }
 
