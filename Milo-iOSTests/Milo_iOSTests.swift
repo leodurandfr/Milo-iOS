@@ -356,18 +356,18 @@ struct StationPrimingTests {
     }
 }
 
-/// Quand la carte de l'écran verrouillé doit se fermer, et quand elle doit tenir.
+/// Ce que montre la carte de l'écran verrouillé quand rien ne porte de titre.
 ///
-/// La règle est celle du fil (§9) : la carte tient pendant un changement de
-/// source, se ferme sans source, vit tant que la session **ou la reprise** porte
-/// un titre, et se ferme sinon. La reprise est la moitié qui compte : c'est elle
-/// qui garde la carte sur un arrêt reprenable.
+/// L'app ne ferme plus la carte — elle le faisait pour tout état sans titre,
+/// pendant que le push de Milō en gardait une, d'où un Mac qui perdait son
+/// icône dès que l'app était ouverte. Tout état se dessine : ce qu'il nomme,
+/// sinon sa source, sinon Milō ; et seul Milō ferme, au bout de sa grâce.
 ///
 /// Les payloads sont ceux du §10 du fil, complétés des champs qu'il omet.
 /// Toutes les clés sont présentes, une valeur absente vaut `null`.
-struct NowPlayingVisibilityTests {
+struct NowPlayingSourceCardTests {
 
-    private func verdict(_ partial: String) throws -> String? {
+    private func card(_ partial: String) throws -> MiloSourceCard.Card {
         let common: [String: Any] = [
             "switching": false, "service": "running", "service_error": NSNull(),
             "availability": [String: Any](), "controls": [String](),
@@ -378,100 +378,63 @@ struct NowPlayingVisibilityTests {
             try JSONSerialization.jsonObject(with: Data(partial.utf8)) as? [String: Any])
         let merged = common.merging(object) { _, new in new }
         let state = try MiloAudioState.decode(try JSONSerialization.data(withJSONObject: merged))
-        return MiloCardVisibility.nothingToShow(in: state)
+        return MiloSourceCard.card(for: state)
     }
 
-    @Test("Une station arrêtée garde sa carte, avec ce qu'un play reprendrait")
-    func aStoppedStationHoldsItsCard() throws {
-        #expect(try verdict("""
-        {"source":"radio","controls":["resume_playback","next","prev"],
-         "resume":{"title":"FIP","artist":null,"album":"FIP","artwork":"/api/radio/favicon?url=x",
-           "duration_ms":null,"position_ms":null}}
-        """) == nil)
+    @Test("Un Mac nomme la source et qui émet, sous l'icône macOS")
+    func aMacNamesItsSenders() throws {
+        // Mesuré le 25/09/2026 : c'est l'état que publie un Mac qui diffuse.
+        #expect(try card("""
+        {"source":"mac",
+         "session":{"id":"18de","phase":"connected","title":null,"artist":null,"album":null,
+           "artwork":null,"senders":["Mac mini de Léo"],"duration_ms":null,"position":null}}
+        """) == MiloSourceCard.Card(title: "Récepteur macOS", artist: "Mac mini de Léo",
+                                    artwork: "/now-playing/macos.jpg"))
     }
 
-    @Test("Une station qui joue garde sa carte")
-    func aPlayingStationHoldsItsCard() throws {
-        #expect(try verdict("""
-        {"source":"radio","controls":["stop","next","prev"],
-         "session":{"id":"a1","phase":"playing","title":"So What","artist":"Miles Davis","album":"FIP",
-           "artwork":null,"senders":[],"duration_ms":null,"position":null}}
-        """) == nil)
-    }
-
-    @Test("Un épisode en pause garde sa carte")
-    func aPausedEpisodeHoldsItsCard() throws {
-        #expect(try verdict("""
-        {"source":"podcast","controls":["resume","seek","set_speed"],
-         "session":{"id":"9f","phase":"paused","title":"Épisode 12","artist":"Le Code a changé",
-           "album":"Le Code a changé","artwork":null,"senders":[],"duration_ms":2400000,
-           "position":{"ms":192000,"at":1790270000.25,"rate":1.5}}}
-        """) == nil)
-    }
-
-    @Test("Une session connectée sans titre ferme la carte")
-    func anUntitledConnectedSessionClosesTheCard() throws {
-        // AirPlay en temps réel, un Bluetooth sans lecteur, le Mac : l'émetteur
-        // est là, mais il n'y a rien à nommer, et Milō n'ouvre pas de carte
-        // pour ça. Une source active sans titre ne garde donc plus la sienne.
-        #expect(try verdict("""
+    @Test("Un Bluetooth sans lecteur nomme l'appareil connecté")
+    func anUntitledReceiverNamesItsSender() throws {
+        #expect(try card("""
         {"source":"bluetooth","controls":["disconnect"],
          "session":{"id":"4b","phase":"connected","title":null,"artist":null,"album":null,
            "artwork":null,"senders":["Pixel 7"],"duration_ms":null,"position":null}}
-        """) == "bluetooth/running/connected/sans titre")
+        """) == MiloSourceCard.Card(title: "Bluetooth", artist: "Pixel 7",
+                                    artwork: "/now-playing/bluetooth.jpg"))
     }
 
-    @Test("Un épisode terminé ferme la carte")
-    func aFinishedEpisodeClosesTheCard() throws {
-        // `eof` oublie la reprise du podcast : il n'y a plus rien à reprendre,
-        // donc plus rien à afficher.
-        #expect(try verdict("""
-        {"source":"podcast","controls":["set_speed"]}
-        """) != nil)
-    }
-
-    @Test("Le repos ferme la carte")
-    func restClosesTheCard() throws {
-        // Spotify sans écoute : un démon tient la session, et il n'y a jamais
-        // de reprise pour lui.
-        #expect(try verdict("""
+    @Test("Une source au repos montre son nom, sans émetteur")
+    func anIdleSourceShowsItsName() throws {
+        #expect(try card("""
         {"source":"spotify"}
-        """) != nil)
+        """) == MiloSourceCard.Card(title: "Spotify", artist: nil,
+                                    artwork: "/now-playing/spotify.jpg"))
     }
 
-    @Test("Un changement de source ne fait pas clignoter la carte")
-    func aSourceChangeDoesNotFlicker() throws {
-        // `switching` est bref et certain : pendant ce battement, rien n'est
-        // prêt et fermer ferait disparaître puis revenir la carte.
-        #expect(try verdict("""
-        {"source":"spotify","switching":true,"service":"starting"}
-        """) == nil)
-    }
-
-    @Test("Aucune source ferme la carte")
-    func noSourceClosesTheCard() throws {
-        #expect(try verdict("""
+    @Test("Aucune source montre la carte de Milō")
+    func noSourceShowsMilo() throws {
+        #expect(try card("""
         {"source":"none","service":"stopped"}
-        """) != nil)
+        """) == MiloSourceCard.Card(title: "Milō", artist: nil, artwork: "/now-playing/milo.jpg"))
     }
 
-    @Test("Un démarrage raté ferme la carte")
-    func aFailedStartClosesTheCard() throws {
-        #expect(try verdict("""
-        {"source":"qobuz","service":"failed",
-         "service_error":{"reason":"start_timeout","message":"Transition timeout after 15s"}}
-        """) != nil)
+    @Test("Une source inconnue de la table montre Milō plutôt qu'une carte vide")
+    func anUnknownSourceShowsMilo() throws {
+        #expect(try card("""
+        {"source":"une-source-future"}
+        """).title == "Milō")
     }
 
-    @Test("La trace dit ce qui a fermé la carte")
-    func theTraceNamesWhatClosed() throws {
-        // Source, service, phase : sans eux, « rien à montrer » se lit pareil
-        // pour un repos, une panne et un émetteur sans titre.
-        #expect(try verdict("""
-        {"source":"podcast"}
-        """) == "podcast/running/sans session/sans titre")
-        #expect(try verdict("""
-        {"source":"none","service":"stopped"}
-        """) == "none/stopped/sans session/sans titre")
+    @Test("La table suit celle de Milō, entrée pour entrée")
+    func theTableMatchesMilo() {
+        // `SOURCE_CARDS` dans `backend/core/push/payloads.py`. Recopiée ici
+        // parce qu'une orthographe différente fait basculer l'écran verrouillé
+        // entre la carte du push et celle de l'app à chaque aller-retour.
+        let pi: [String: String] = [
+            "spotify": "Spotify", "qobuz": "Qobuz", "tidal": "TIDAL",
+            "airplay": "AirPlay", "bluetooth": "Bluetooth", "mac": "Récepteur macOS",
+            "radio": "Webradio", "podcast": "Podcasts", "music_library": "Bibliothèque",
+            "cd": "Lecteur CD",
+        ]
+        #expect(MiloSourceCard.sources.mapValues(\.title) == pi)
     }
 }

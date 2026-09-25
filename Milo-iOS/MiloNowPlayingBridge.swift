@@ -1,49 +1,64 @@
 import Foundation
 import NowPlaying
 
-/// La règle d'affichage de la carte, séparée de la session qu'elle commande.
+/// Ce que montre la carte quand rien ne porte de titre : le nom de la source
+/// sur son icône du dock, et qui émet quand quelqu'un émet — la carte de Milō
+/// quand aucune source n'est choisie.
 ///
-/// Hors de `MiloNowPlayingBridge`, qui est `@available(iOS 27, *)` parce que
-/// `RemoteMediaSession` l'exige — alors que décider s'il y a quelque chose à
-/// montrer ne tient qu'à un dictionnaire. La séparation n'est pas cosmétique :
-/// le macro `@Test` refuse une fonction moins disponible que la cible de test,
-/// si bien que la règle restait sans test tant qu'elle vivait derrière cette
-/// barrière — et c'est une règle qui décide seule si la carte de l'écran
-/// verrouillé existe.
-enum MiloCardVisibility {
+/// **L'app ne ferme plus jamais la carte.** Elle le faisait dès que
+/// `MiloAudioState.shown` était vide, pendant que le push de Milō, lui, gardait
+/// une carte — l'icône macOS pour un Mac. D'où un Mac qui avait son icône app
+/// fermée et perdait sa carte app ouverte (constaté le 25/09/2026). Désormais
+/// tout état se dessine, et la carte ne finit que d'une façon : Milō l'arrête
+/// cinq minutes après la fin de la lecture (`SESSION_IDLE_GRACE_S`), `none`
+/// compris — choix de Leo, le 25/09/2026.
+///
+/// Hors de `MiloNowPlayingBridge`, qui est `@available(iOS 27, *)` : le macro
+/// `@Test` refuse une fonction moins disponible que la cible de test, et la
+/// règle ne tient qu'à l'état.
+enum MiloSourceCard {
 
-    /// Pourquoi il n'y a rien à montrer — ou `nil` quand il y a quelque chose.
-    ///
-    /// La règle est celle du fil (« Développeurs : le fil », §9), la même que
-    /// Milō applique quand il construit ses notifications, dans cet ordre :
-    ///
-    /// - **changement de source en cours** (`switching`) : la carte **tient**.
-    ///   Rien n'est prêt pendant ce battement, et fermer ferait disparaître
-    ///   puis réapparaître la carte à chaque bascule ;
-    /// - **aucune source** : la carte se ferme ;
-    /// - **la session ou la reprise porte un titre** : la carte vit — en
-    ///   lecture, en pause, ou arrêtée sur ce qu'une pression sur play
-    ///   reprendrait ;
-    /// - sinon la carte se ferme : il n'y a rien à nommer.
-    ///
-    /// « Porte un titre » est `MiloAudioState.shown`, lu dans le fichier que
-    /// l'app partage octet pour octet avec Milo-Mac : la carte de l'écran
-    /// verrouillé et la ligne de la barre des menus ne peuvent pas diverger sur
-    /// la question.
-    ///
-    /// Ce qui a changé avec le fil : une source **active** ne garde plus sa
-    /// carte sans titre. Le fil publie désormais la phase elle-même, et une
-    /// session sans titre est une session qui n'a rien à afficher — AirPlay en
-    /// temps réel, un Bluetooth sans lecteur, le Mac. Milō n'ouvre pas de carte
-    /// pour elles ; l'app n'en garde pas non plus.
-    static func nothingToShow(in state: MiloAudioState) -> String? {
-        if state.switching { return nil }
-        if state.source != "none", state.shown != nil { return nil }
+    struct Card: Equatable {
+        let title: String
+        let artist: String?
+        let artwork: String
+    }
 
-        // Le verdict a plusieurs moitiés, et une trace qui n'en porte qu'une ne
-        // dit pas laquelle a fermé la carte.
-        let phase = state.session.map(\.phase.rawValue) ?? "sans session"
-        return "\(state.source)/\(state.service.rawValue)/\(phase)/sans titre"
+    /// Les libellés français du dock, figés plutôt que traduits.
+    ///
+    /// **La même table que `SOURCE_CARDS` dans `backend/core/push/payloads.py`,
+    /// à changer des deux côtés ou pas du tout.** Le push de Milō et cette app
+    /// construisent la même carte ; deux orthographes feraient basculer
+    /// l'écran verrouillé de l'une à l'autre à chaque aller-retour. Milō ne
+    /// connaît pas la langue du téléphone, d'où des noms fixes.
+    ///
+    /// Les icônes sont des fichiers statiques de Milō
+    /// (`frontend/public/now-playing/`), rendus à 600 px à bords perdus :
+    /// iOS arrondit lui-même.
+    static let sources: [String: (title: String, icon: String)] = [
+        "spotify": ("Spotify", "spotify"),
+        "qobuz": ("Qobuz", "qobuz"),
+        "tidal": ("TIDAL", "tidal"),
+        "airplay": ("AirPlay", "airplay"),
+        "bluetooth": ("Bluetooth", "bluetooth"),
+        "mac": ("Récepteur macOS", "macos"),
+        "radio": ("Webradio", "radio"),
+        "podcast": ("Podcasts", "podcast"),
+        "music_library": ("Bibliothèque", "music-library"),
+        "cd": ("Lecteur CD", "cd"),
+    ]
+
+    /// `none`, et une source que la table ne connaît pas encore.
+    static let milo = (title: "Milō", icon: "milo")
+
+    static func card(for state: MiloAudioState) -> Card {
+        let entry = sources[state.source] ?? milo
+        let senders = state.session?.senders ?? []
+        return Card(
+            title: entry.title,
+            artist: senders.isEmpty ? nil : senders.joined(separator: ", "),
+            artwork: "/now-playing/\(entry.icon).jpg"
+        )
     }
 }
 
@@ -208,10 +223,7 @@ enum MiloNowPlayingBridge {
 
         // Ne rien changer si Milō est injoignable : une coupure réseau n'est
         // pas une fin de lecture, et effacer la carte à chaque paquet perdu la
-        // ferait clignoter. C'est l'opposé de « rien à montrer », juste en
-        // dessous, qui doit au contraire l'effacer — les deux se lisaient comme
-        // « pas d'attributs » et menaient au même `return`, d'où la carte figée
-        // sur la piste d'avant à chaque changement de source.
+        // ferait clignoter.
         guard let audioData = try? await MiloAPIClient.get(path: "/api/audio/state") else {
             note("pas d'état exploitable depuis Milō")
             return
@@ -229,21 +241,9 @@ enum MiloNowPlayingBridge {
             return
         }
 
-        if let seen = MiloCardVisibility.nothingToShow(in: state) {
-            // Réconcilier d'abord : on ferme ce que le système tient vraiment,
-            // pas ce que l'app croit tenir.
-            await reconcileSession()
-            guard session != nil else {
-                // Passage muet jusqu'ici, et c'est ce qui a rendu la panne
-                // illisible : le statut gardait son « update ok » d'avant, si
-                // bien qu'une app qui tournait sans rien trouver à fermer
-                // ressemblait trait pour trait à une app qui ne tournait pas.
-                note("rien à montrer (\(seen)), aucune session tenue")
-                return
-            }
-            await endSession(reason: seen)
-            return
-        }
+        // Il n'y a plus de « rien à montrer » : un état sans titre se dessine en
+        // carte de source, ou de Milō (`MiloSourceCard`), et seul Milō ferme la
+        // carte, au bout de sa grâce.
 
         // Réconcilier à **chaque** passe, et ici plutôt qu'après la
         // construction.
@@ -256,12 +256,11 @@ enum MiloNowPlayingBridge {
 
         // **Décider avant de payer.** Construire les attributs coûte deux
         // requêtes de plus — `/api/volume/state` et `/api/multiroom/state`,
-        // dans `buildDevices` — plus le dépôt de la pochette. Tant qu'une
-        // source arrêtée rendait « rien à montrer », ce chemin ne s'ouvrait que
-        // pour quelque chose qui jouait ; depuis qu'elle garde sa carte, il
-        // s'ouvre aussi quand personne ne tient de session et n'en ouvrira, et
-        // ces trois requêtes toutes les deux secondes partaient alors à la
-        // poubelle — pour toute la durée où l'app reste au premier plan.
+        // dans `buildDevices` — plus le dépôt de la pochette. Tout état se
+        // dessine désormais, y compris quand personne ne tient de session et
+        // n'en ouvrira, et ces trois requêtes toutes les deux secondes
+        // partiraient alors à la poubelle — pour toute la durée où l'app reste
+        // au premier plan.
         let isPlaying = state.session?.phase == .playing
         guard session != nil || mayOpenSession(isPlaying: isPlaying) else {
             note("aucune session, et rien à ouvrir")
@@ -283,8 +282,7 @@ enum MiloNowPlayingBridge {
         // dirait rien de plus et coûterait tout.
         // `positionJumped` met à jour son propre suivi, et n'est donc appelé
         // que sur les passes qui construisent vraiment des attributs. Les
-        // sorties au-dessus n'en produisent aucun : il n'y a rien à comparer,
-        // et `endSession` remet `lastElapsed` à nil de son côté.
+        // sorties au-dessus n'en produisent aucun : il n'y a rien à comparer.
         let jumped = positionJumped(attributes)
         let signature = displaySignature(attributes)
 
@@ -330,44 +328,6 @@ enum MiloNowPlayingBridge {
         }
     }
 
-    /// Aligne ce qu'on tient sur ce que le système tient, et réclame l'écran.
-    ///
-    /// **L'app n'ouvre plus de session.** Elle l'a fait, et c'était la rivalité
-    /// qu'on croyait supprimer : mesuré le 19/09/2026 à 17:46:30, deux sessions
-    /// vivantes en même temps — `9AA6ACC5`, ouverte ici, principale et donc
-    /// seule visible, mais que Milō avait déjà terminée de son côté ; et
-    /// `7e148d0e`, ouverte par le push de Milō, qui recevait tous les `update`
-    /// sans que personne ne les voie. Une session ouverte par push ne peut pas
-    /// réclamer l'écran elle-même — `requestToBecomeSystemPrimary()` exige le
-    /// premier plan, et quand elle naît l'app dort. La seule qui pouvait le
-    /// faire était donc celle qu'il ne fallait pas.
-    ///
-    /// Milō est propriétaire du cycle de vie ; l'app ne fait que suivre, et
-    /// pousse ses `update` sur le LAN tant qu'elle est ouverte parce que c'est
-    /// plus rapide qu'un aller-retour par Apple. Quand rien n'est ouvert, il n'y
-    /// a rien à afficher et rien à faire : Milō pousse un `start` dès que la
-    /// lecture reprend.
-    /// Ferme la session et efface la carte.
-    ///
-    /// L'app ne possède pas le cycle de vie — Milō ouvre, l'app suit. Mais elle
-    /// est la seule à savoir que plus rien ne joue **et** que la carte est
-    /// encore là : Milō, lui, a déjà tourné la page. `reportLiveSessions`, appelé
-    /// à chaque passe, lui apprend aussitôt que le téléphone ne tient plus rien,
-    /// donc le token est retiré au lieu d'être adressé dans le vide.
-    private static func endSession(reason: String) async {
-        guard let live = session else { return }
-        session = nil
-        systemHoldsAny = false
-        lastSignature = ""
-        lastElapsed = nil
-        do {
-            try await live.end()
-            note("session close (\(reason))")
-        } catch {
-            note("fermeture refusée : \(error)")
-        }
-    }
-
     /// Le système tient-il **une** session, même lâchée par l'app ?
     ///
     /// Distinct de `session != nil` : une session écartée dans `disowned` reste
@@ -405,8 +365,8 @@ enum MiloNowPlayingBridge {
     /// avant qu'on ouvre l'app — où rien n'ouvrait de session, puisque Milō
     /// n'envoie un `start` que sur un événement de lecture.
     ///
-    /// **`isPlaying` reste, et ce n'est pas un oubli depuis que `nothingToShow`
-    /// tient la carte sur une source arrêtée.** Ouvrir et ne pas fermer sont
+    /// **`isPlaying` reste, et ce n'est pas un oubli depuis que tout état se
+    /// dessine (`MiloSourceCard`).** Ouvrir et ne pas fermer sont
     /// deux droits distincts, et Milō ne s'accorde que le second : son
     /// `_start_session` n'est atteint que sous `_has_active_source`, donc il
     /// n'ouvre jamais pour une source arrêtée, et il ferme celle qui existe au
@@ -457,6 +417,27 @@ enum MiloNowPlayingBridge {
         }
     }
 
+    /// Aligne ce qu'on tient sur ce que le système tient, et réclame l'écran.
+    ///
+    /// **L'app n'ouvre plus de session.** Elle l'a fait, et c'était la rivalité
+    /// qu'on croyait supprimer : mesuré le 19/09/2026 à 17:46:30, deux sessions
+    /// vivantes en même temps — `9AA6ACC5`, ouverte ici, principale et donc
+    /// seule visible, mais que Milō avait déjà terminée de son côté ; et
+    /// `7e148d0e`, ouverte par le push de Milō, qui recevait tous les `update`
+    /// sans que personne ne les voie. Une session ouverte par push ne peut pas
+    /// réclamer l'écran elle-même — `requestToBecomeSystemPrimary()` exige le
+    /// premier plan, et quand elle naît l'app dort. La seule qui pouvait le
+    /// faire était donc celle qu'il ne fallait pas.
+    ///
+    /// Milō est propriétaire du cycle de vie ; l'app ne fait que suivre, et
+    /// pousse ses `update` sur le LAN tant qu'elle est ouverte parce que c'est
+    /// plus rapide qu'un aller-retour par Apple. Quand rien n'est ouvert, il n'y
+    /// a rien à afficher et rien à faire : Milō pousse un `start` dès que la
+    /// lecture reprend.
+    ///
+    /// Elle ne ferme pas non plus : la carte finit quand Milō l'arrête, cinq
+    /// minutes après la fin de la lecture (voir `MiloSourceCard`).
+    ///
     private static func reconcileSession() async {
         let all = (try? await RemoteMediaSession<MiloSessionAttributes>.sessions()) ?? []
         systemHoldsAny = !all.isEmpty
@@ -510,19 +491,10 @@ enum MiloNowPlayingBridge {
 
     // MARK: - Construction
 
-    /// Ce que Milō dit de lui-même, en trois cas qu'il ne faut surtout pas
-    /// confondre.
-    ///
-    /// `injoignable` et `rienÀMontrer` se lisaient jusqu'ici tous les deux comme
-    /// « pas d'attributs » et menaient au même `return` : on ne touchait à rien.
-    /// D'où le symptôme — on change de source, plus rien n'est prêt, et la carte
-    /// reste figée sur la piste d'avant, en pause. Ce sont deux situations
-    /// opposées : une coupure réseau ne doit **rien** changer à l'affichage, une
-    /// absence de source doit l'effacer.
     /// Les attributs complets, à partir de l'état déjà lu.
     ///
-    /// Ne décide plus s'il y a quelque chose à montrer — `refresh()` l'a
-    /// tranché avant d'appeler, et c'est tout l'intérêt : cette fonction coûte
+    /// Ne décide pas s'il faut une carte — `refresh()` l'a tranché avant
+    /// d'appeler, et c'est tout l'intérêt : cette fonction coûte
     /// deux requêtes et un dépôt de pochette, et on ne les paie que pour une
     /// session que quelqu'un lira.
     ///
@@ -537,8 +509,9 @@ enum MiloNowPlayingBridge {
     ///   l'instant `position.at`. Le système interpole à partir de là, comme
     ///   la formule du fil. Sans ancrage (radio, reprise seule), `0` et
     ///   l'heure de construction ;
-    /// - la piste vient de la session, sinon de la reprise :
-    ///   `MiloAudioState.shown`, la règle même qui décide que la carte existe.
+    /// - la piste vient de la session, sinon de la reprise
+    ///   (`MiloAudioState.shown`), sinon de la carte de la source ou de Milō
+    ///   (`MiloSourceCard`) — la même règle que `build_attributes` côté Milō.
     private static func buildAttributes(from state: MiloAudioState) async -> MiloSessionAttributes {
         let session = state.session
         let anchor = session?.position
@@ -573,19 +546,19 @@ enum MiloNowPlayingBridge {
             if let artwork = track?.artworkURL {
                 await MiloAPIClient.cacheArtwork(from: artwork)
             }
-        } else if state.source == "mac", let senders = session?.senders, !senders.isEmpty {
-            // Un Mac envoie un flux, pas des pistes : la carte nomme qui émet,
-            // sous l'icône macOS du dock — ce que le push de Milō envoie aussi.
-            let title = senders.joined(separator: ", ")
+        } else {
+            // Rien ne porte de titre — un Mac, un récepteur sans émetteur, une
+            // source au repos, aucune source : sa carte, comme le push de Milō.
+            let card = MiloSourceCard.card(for: state)
             track = MiloSessionAttributes.Track(
-                id: state.source + ":" + title,
-                title: title,
-                artist: nil,
+                id: state.source + ":" + card.title,
+                title: card.title,
+                artist: card.artist,
                 album: nil,
                 duration: 0,
-                artworkURL: macArtwork
+                artworkURL: card.artwork
             )
-            await MiloAPIClient.cacheArtwork(from: macArtwork)
+            await MiloAPIClient.cacheArtwork(from: card.artwork)
         }
 
         return MiloSessionAttributes(
@@ -603,9 +576,6 @@ enum MiloNowPlayingBridge {
             controls: state.controls
         )
     }
-
-    /// L'icône macOS du dock, un fichier statique de Milō.
-    private static let macArtwork = "/now-playing/macos.jpg"
 
     /// Avec la fraction de seconde : l'ancrage de Milō la porte (`at` vaut
     /// `1790270000.25`), et la jeter décalerait la tête de lecture d'autant.
