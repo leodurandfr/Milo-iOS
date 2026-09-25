@@ -1,4 +1,5 @@
 import ExtensionFoundation
+import Foundation
 import NowPlaying
 
 /// Point d'entrée de l'extension Now Playing.
@@ -18,9 +19,12 @@ struct MiloNowPlayingExtension: RemoteMediaSessionExtension {
         // silence se lit sinon comme un chemin jamais pris.
         miloLog.info("EXTENSION DÉMARRÉE — binaire \(miloBinaryStamp(), privacy: .public)")
 
-        // Cette extension n'atteint pas Milō par son IP — voir
-        // `MiloAPIClient.prefersHostname`, où la mesure est consignée.
+        // Tout ce qui part vers Milō passe par un chemin lié au Wi-Fi — voir
+        // `MiloScopedHTTP`, où la mesure est consignée. Les URL restent en
+        // `milo.local` (`prefersHostname`) : c'est à ce nom que `lanData`
+        // reconnaît une requête destinée à Milō.
         MiloAPIClient.prefersHostname = true
+        MiloAPIClient.scopedTransport = { try await MiloScopedHTTP.perform($0) }
     }
 
     var configuration: RemoteMediaSessionExtensionConfiguration<Self> {

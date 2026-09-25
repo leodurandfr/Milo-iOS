@@ -231,7 +231,7 @@ extension MiloAPIClient {
         // c'est-à-dire, pour un fantôme, jamais. C'est le même piège que celui
         // consigné au-dessus de `registerPushToken`, et il se referme de la
         // même façon.
-        guard let (_, response) = try? await lan.data(for: request),
+        guard let (_, response) = try? await lanData(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200
         else { return }
 
@@ -356,7 +356,7 @@ extension MiloAPIClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = payload
 
-        guard let (data, response) = try? await lan.data(for: request),
+        guard let (data, response) = try? await lanData(for: request),
               let http = response as? HTTPURLResponse
         else { return .unavailable }
 
@@ -434,7 +434,7 @@ extension MiloAPIClient {
         request.httpMethod = "DELETE"
         request.timeoutInterval = 3
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        guard let (_, response) = try? await lan.data(for: request),
+        guard let (_, response) = try? await lanData(for: request),
               let http = response as? HTTPURLResponse else { return false }
         return http.statusCode == 200 || http.statusCode == 404
     }

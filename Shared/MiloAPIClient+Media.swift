@@ -207,7 +207,7 @@ extension MiloAPIClient {
         for attempt in 1...attempts {
             request.timeoutInterval = each
             do {
-                let (data, response) = try await lan.data(for: request)
+                let (data, response) = try await lanData(for: request)
                 let code = (response as? HTTPURLResponse)?.statusCode ?? -1
                 let status = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
                     .flatMap { $0?["status"] as? String } ?? "?"
@@ -397,7 +397,7 @@ extension MiloAPIClient {
         // l'encodage du MAC est resté invisible.
         let defaults = UserDefaults(suiteName: appGroupID)
         do {
-            let (data, response) = try await lan.data(for: request)
+            let (data, response) = try await lanData(for: request)
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             guard code == 200 else {
                 defaults?.set("\(label) -> HTTP \(code)", forKey: "milo_volume_write_error")

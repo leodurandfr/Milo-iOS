@@ -58,6 +58,11 @@ struct MiloAPIClient {
     /// réseau local à autoriser — ce qu'une extension ne peut pas demander,
     /// faute d'écran — là où la résolution `.local` passe.
     ///
+    /// Ce refus visait un chemin **non lié** à une interface. Lié au Wi-Fi, la
+    /// même IP passe (mesuré le 25/09/2026) : c'est ce que fait
+    /// `scopedTransport`, que l'extension pose aussi. Cette URL en `milo.local`
+    /// n'y sert plus qu'à reconnaître les requêtes destinées à Milō.
+    ///
     /// L'IP reste préférable partout ailleurs : elle évite une résolution mDNS
     /// à chaque requête, ce qui compte pour un widget dont le processus est tué
     /// s'il traîne.
@@ -112,6 +117,31 @@ struct MiloAPIClient {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: configuration)
     }()
+
+    /// Le transport des requêtes adressées à Milō, quand l'hôte en impose un.
+    ///
+    /// Seule l'extension Now Playing en pose un — `MiloScopedHTTP`, lié au
+    /// Wi-Fi : sous la restriction réseau que `mediaremoted` lui impose, un
+    /// chemin non lié vers le LAN est refusé par NECP, et `URLSession` ne sait
+    /// pas lier une requête à une interface. L'app et le widget n'ont pas cette
+    /// restriction et gardent `URLSession`.
+    nonisolated(unsafe) static var scopedTransport: (@Sendable (URLRequest) async throws -> (Data, URLResponse))?
+
+    /// `session.data(for:)`, sauf pour une requête adressée à Milō quand un
+    /// transport lié est posé. Tout ce qui part vers Milō passe par ici.
+    static func lanData(for request: URLRequest,
+                        session: URLSession = lan) async throws -> (Data, URLResponse) {
+        if let scopedTransport, let host = request.url?.host, isMiloHost(host) {
+            return try await scopedTransport(request)
+        }
+        return try await session.data(for: request)
+    }
+
+    private static func isMiloHost(_ host: String) -> Bool {
+        if host == "milo.local" { return true }
+        let cached = UserDefaults(suiteName: appGroupID)?.string(forKey: ipAddressKey)
+        return host == cached
+    }
 
     static func baseURL() -> String {
         if prefersHostname { return "http://milo.local" }
@@ -273,7 +303,7 @@ struct MiloAPIClient {
         var request = URLRequest(url: url)
         request.timeoutInterval = candidateProbeTimeout
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        guard let (_, response) = try? await lan.data(for: request) else { return false }
+        guard let (_, response) = try? await lanData(for: request) else { return false }
         return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
@@ -447,7 +477,7 @@ struct MiloAPIClient {
         request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         do {
-            let (data, _) = try await lan.data(for: request)
+            let (data, _) = try await lanData(for: request)
             return data
         } catch {
             forgetCachedIPAddress(after: error)
@@ -467,7 +497,7 @@ struct MiloAPIClient {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         do {
-            let (data, _) = try await lan.data(for: request)
+            let (data, _) = try await lanData(for: request)
             return data
         } catch {
             forgetCachedIPAddress(after: error)

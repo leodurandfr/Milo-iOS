@@ -328,7 +328,10 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
 
         for attempt in 1...attempts {
             do {
-                let (data, response) = try await URLSession.shared.data(for: request)
+                // Par `lanData` : une pochette hébergée par Milō part alors sur le
+                // chemin lié au Wi-Fi, les autres restent sur `URLSession.shared`.
+                let (data, response) = try await MiloAPIClient.lanData(for: request,
+                                                                       session: .shared)
                 let code = (response as? HTTPURLResponse)?.statusCode ?? -1
                 miloLog.info("""
                     réseau servi : HTTP \(code, privacy: .public), \
