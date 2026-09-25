@@ -361,6 +361,19 @@ enum MiloNowPlayingBridge {
     private static var lastStartAttempt = Date.distantPast
     private static let startRetryDelay: TimeInterval = 10
 
+    /// Les trois gardes d'`openSession`, lisibles avant d'avoir construit
+    /// quoi que ce soit.
+    ///
+    /// Extraites pour que `refresh()` puisse poser la question avec la seule
+    /// `phase` de `/api/audio/state`, sans payer les deux requêtes de
+    /// `buildDevices`. Une seule définition : deux réponses divergentes à
+    /// « va-t-on ouvrir ? » feraient soit construire pour rien, soit renoncer à
+    /// une ouverture légitime.
+    private static func mayOpenSession(isPlaying: Bool) -> Bool {
+        !systemHoldsAny && isPlaying
+            && Date().timeIntervalSince(lastStartAttempt) > startRetryDelay
+    }
+
     /// Ouvre une session quand personne ne l'a fait et que la lecture est en cours.
     ///
     /// **C'est le retour d'un chemin retiré le 19/09/2026, et ce n'est pas un
@@ -372,7 +385,8 @@ enum MiloNowPlayingBridge {
     /// Trois gardes, et la première est celle qui manquait alors :
     ///
     /// - **le système ne tient rien** — `sessions()` vide, pas seulement « l'app
-    ///   n'en tient pas » ; c'est la distinction qui a coûté la panne ;
+    ///   n'en tient pas » ; c'est la distinction qui a coûté la panne. Relu
+    ///   juste avant le `start`, et pas seulement en début de passe ;
     /// - **quelque chose joue** — et depuis qu'une source arrêtée garde sa
     ///   carte, cette garde-là mérite sa propre justification, plus bas ;
     /// - **un essai toutes les dix secondes** au plus.
@@ -400,23 +414,21 @@ enum MiloNowPlayingBridge {
     /// boucle de premier plan n'ayant aucune expiration à elle. Ce serait
     /// reprendre à Milō le cycle de vie que tout ce fichier lui laisse.
     ///
-    /// La carte en pause s'ouvre donc comme avant : pendant que ça jouait. Ce
-    /// qui a changé est qu'elle survit cinq minutes à l'arrêt.
-    /// Les trois conditions d'une ouverture, lisibles avant d'avoir construit
-    /// quoi que ce soit.
-    ///
-    /// Extraites pour que `refresh()` puisse poser la question avec la seule
-    /// `phase` de `/api/audio/state`, sans payer les deux requêtes de
-    /// `buildDevices`. Une seule définition : deux réponses divergentes à
-    /// « va-t-on ouvrir ? » feraient soit construire pour rien, soit renoncer à
-    /// une ouverture légitime.
-    private static func mayOpenSession(isPlaying: Bool) -> Bool {
-        !systemHoldsAny && isPlaying
-            && Date().timeIntervalSince(lastStartAttempt) > startRetryDelay
-    }
-
+    /// La carte en pause s'ouvre donc comme avant : pendant que ça jouait. Sa
+    /// fin reste l'affaire de Milō.
     private static func openSession(_ attributes: MiloSessionAttributes) async {
         guard mayOpenSession(isPlaying: attributes.isPlaying) else { return }
+
+        // `systemHoldsAny` date de `reconcileSession`, d'avant les requêtes de
+        // `buildAttributes` — pochette, volume, multiroom. Un `start` de Milō
+        // arrivé pendant ce temps a déjà ouvert sa session : ouvrir la nôtre
+        // referait les deux sessions du 19/09. La passe suivante l'adoptera.
+        let current = (try? await RemoteMediaSession<MiloSessionAttributes>.sessions()) ?? []
+        guard current.isEmpty else {
+            systemHoldsAny = true
+            note("ouverture abandonnée : une session est née entre-temps")
+            return
+        }
         lastStartAttempt = Date()
 
         do {
@@ -442,24 +454,27 @@ enum MiloNowPlayingBridge {
 
     /// Aligne ce qu'on tient sur ce que le système tient, et réclame l'écran.
     ///
-    /// **L'app n'ouvre plus de session.** Elle l'a fait, et c'était la rivalité
-    /// qu'on croyait supprimer : mesuré le 19/09/2026 à 17:46:30, deux sessions
-    /// vivantes en même temps — `9AA6ACC5`, ouverte ici, principale et donc
+    /// **Ici, l'app n'ouvre pas de session : elle adopte.** Ouvrir pendant que
+    /// Milō ouvrait aussi, c'était la rivalité qu'on croyait supprimer : mesuré
+    /// le 19/09/2026 à 17:46:30, deux sessions vivantes en même temps —
+    /// `9AA6ACC5`, ouverte ici, principale et donc
     /// seule visible, mais que Milō avait déjà terminée de son côté ; et
     /// `7e148d0e`, ouverte par le push de Milō, qui recevait tous les `update`
     /// sans que personne ne les voie. Une session ouverte par push ne peut pas
     /// réclamer l'écran elle-même — `requestToBecomeSystemPrimary()` exige le
     /// premier plan, et quand elle naît l'app dort. La seule qui pouvait le
-    /// faire était donc celle qu'il ne fallait pas.
+    /// faire était donc celle qu'il ne fallait pas. L'ouverture est revenue
+    /// depuis, gardée contre ce cas précis : voir `openSession`.
     ///
     /// Milō est propriétaire du cycle de vie ; l'app ne fait que suivre, et
     /// pousse ses `update` sur le LAN tant qu'elle est ouverte parce que c'est
-    /// plus rapide qu'un aller-retour par Apple. Quand rien n'est ouvert, il n'y
-    /// a rien à afficher et rien à faire : Milō pousse un `start` dès que la
-    /// lecture reprend.
+    /// plus rapide qu'un aller-retour par Apple. Quand rien n'est ouvert, c'est
+    /// à Milō d'ouvrir : il pousse un `start` dès que la lecture reprend.
+    /// `openSession` ne couvre que la lecture déjà en cours avant qu'on ouvre
+    /// l'app.
     ///
-    /// Elle ne ferme pas non plus : la carte finit quand Milō l'arrête, cinq
-    /// minutes après la fin de la lecture (voir `MiloSourceCard`).
+    /// Elle ne ferme pas non plus : la carte finit quand Milō l'arrête (voir
+    /// `MiloSourceCard`).
     ///
     private static func reconcileSession() async {
         let all = (try? await RemoteMediaSession<MiloSessionAttributes>.sessions()) ?? []
@@ -587,8 +602,8 @@ enum MiloNowPlayingBridge {
         return MiloSessionAttributes(
             // Place tenue, jamais envoyée telle quelle : `refresh()` la remplace
             // par l'identifiant de la session qu'il tient, seul que
-            // `update(_:)` accepte. L'app n'en mint plus aucun — voir
-            // `reconcileSession`.
+            // `update(_:)` accepte. Celui d'une session ouverte par l'app est
+            // minté dans `openSession`, au moment d'ouvrir.
             id: "",
             isPlaying: session?.phase == .playing,
             elapsedTime: anchor.map { TimeInterval($0.ms) / 1000 } ?? 0,
