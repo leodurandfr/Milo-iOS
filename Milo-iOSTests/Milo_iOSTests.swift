@@ -139,6 +139,66 @@ struct RenderedLevelTests {
     }
 }
 
+/// Ce qu'on confirme au système après qu'il a demandé un niveau.
+///
+/// Mesuré le 26/09/2026 : une valeur égale à celle que le système vient de
+/// demander ne remonte pas jusqu'au curseur de la carte, qui restait figé sous
+/// les boutons physiques — et, figé en haut, ramenait toute sa course à
+/// -78…-72 dB. Ces tests figent l'écart qui en fait une nouvelle valeur.
+struct DisplayedLevelTests {
+
+    /// Les niveaux du relevé : plancher, plafond à -72 dB, avant les appuis,
+    /// butée haute.
+    let requested: [Float] = [0.01, 0.0855, 0.5398643, 1.0]
+
+    @Test("Une valeur fraîche ne revient jamais bit à bit au système")
+    func aFreshLevelIsNeverEchoedVerbatim() {
+        for level in requested {
+            let shown = Float(MiloAPIClient.displayedLevel(
+                optimistic: Double(level), reported: 0.3))
+            #expect(shown != level, "rendu \(shown) pour \(level) demandé")
+        }
+    }
+
+    @Test("L'écart reste imperceptible et dans la course")
+    func theOffsetStaysSmallAndInRange() {
+        for level in requested {
+            let shown = MiloAPIClient.displayedLevel(
+                optimistic: Double(level), reported: 0.3)
+            #expect(abs(shown - Double(level)) <= MiloAPIClient.acknowledgedOffset + 1e-9)
+            #expect(shown >= MiloAPIClient.renderedFloor)
+            #expect(shown <= 1)
+        }
+    }
+
+    @Test("L'écart ne réordonne pas deux enceintes")
+    func theOffsetKeepsTheOrder() {
+        // Une première version basculait à 0,5 : 0,4999 passait devant 0,5001.
+        let below = MiloAPIClient.displayedLevel(optimistic: 0.4999, reported: 0.3)
+        let above = MiloAPIClient.displayedLevel(optimistic: 0.5001, reported: 0.3)
+        #expect(below < above)
+    }
+
+    @Test("La base d'un geste ne porte pas l'écart")
+    func theGestureBaseCarriesNoOffset() {
+        // Parti du niveau affiché, `noteShift` rangerait l'écart dans la valeur
+        // optimiste, et le rendu suivant l'ajouterait une seconde fois.
+        for level in requested {
+            #expect(MiloAPIClient.baseLevel(optimistic: Double(level), reported: 0.3)
+                    == MiloAPIClient.renderedLevel(Double(level)))
+        }
+        #expect(MiloAPIClient.baseLevel(optimistic: nil, reported: 0)
+                == MiloAPIClient.renderedFloor)
+    }
+
+    @Test("Sans valeur fraîche, ce que Milō rapporte passe tel quel")
+    func withoutAFreshLevelMiloIsShownAsIs() {
+        #expect(MiloAPIClient.displayedLevel(optimistic: nil, reported: 0.5398643) == 0.5398643)
+        #expect(MiloAPIClient.displayedLevel(optimistic: nil, reported: 0)
+                == MiloAPIClient.renderedFloor)
+    }
+}
+
 /// Le niveau optimiste, celui que l'affichage préfère pendant trois secondes.
 ///
 /// Il est rangé sur l'échelle du curseur. La version précédente y rangeait des
