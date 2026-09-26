@@ -67,7 +67,8 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// Sans lui rien d'observable ne change à la fin d'un rappel — les valeurs
     /// optimistes vivent dans le conteneur partagé — et `devices` n'était relu
     /// qu'au push suivant de Milō, 0,5 à 1,2 s plus tard, ou jamais quand le
-    /// niveau n'avait pas bougé (en butée).
+    /// niveau n'avait pas bougé (en butée). Incrémenté deux fois par geste :
+    /// dès que la rafale est réunie, puis à la fin de l'écriture.
     private var volumeEcho: UInt = 0
 
     init(attributes: MiloSessionAttributes) {
@@ -571,16 +572,25 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                         // requête qui échoue, et ce sont deux causes opposées.
                         miloLog.info("RAPPEL VOLUME \(device.id, privacy: .public) -> \(newLevel, privacy: .public)")
                         Self.trace("onChange \(device.id) -> \(newLevel)")
+                        let echo: @Sendable () async -> Void = {
+                            await MainActor.run { self?.volumeEcho &+= 1 }
+                        }
+                        // Première relecture dès que la rafale est réunie,
+                        // avant le réseau : c'est elle qui fait suivre le
+                        // curseur. La seconde, ici, montre ce que l'écriture a
+                        // changé — un niveau borné par Milō, ou l'affichage
+                        // rendu à Milō sur un échec.
                         let sent = await MiloAPIClient.applyVolume(mac: device.id,
                                                                    to: newLevel,
-                                                                   snapshot: snapshot)
+                                                                   snapshot: snapshot,
+                                                                   echo: echo)
                         // Seul le rappel dont l'envoi est allé au bout fait
                         // relire : un rappel absorbé par la rafale suivante, ou
                         // doublé par elle pendant l'aller-retour, rendrait en
                         // plein geste des niveaux déjà dépassés, donc une base
                         // périmée pour le facteur suivant.
                         guard sent else { return }
-                        await MainActor.run { self?.volumeEcho &+= 1 }
+                        await echo()
                     }
                 ]
             )

@@ -308,8 +308,13 @@ extension MiloAPIClient {
     /// son écriture à terme, `false` s'il a été absorbé par une rafale plus
     /// récente ou n'avait rien à envoyer : seul le premier a quelque chose de
     /// neuf à faire relire.
+    ///
+    /// `echo` est appelé dès que les niveaux optimistes de la rafale sont
+    /// posés, **avant** l'aller-retour réseau : c'est ce qui fait suivre le
+    /// curseur de la carte sans attendre Milō. Voir `VolumeGesture.send`.
     static func applyVolume(mac: String, to target: Float,
-                            snapshot: [String: Float]) async -> Bool {
+                            snapshot: [String: Float],
+                            echo: @escaping @Sendable () async -> Void) async -> Bool {
         var levels: [String: Double] = [:]
         for (id, level) in snapshot {
             levels[id.replacingOccurrences(of: ":", with: "")] =
@@ -319,7 +324,8 @@ extension MiloAPIClient {
         return await VolumeGesture.shared.record(
             mac: mac.replacingOccurrences(of: ":", with: ""),
             target: min(max(Double(target), 0), 1),
-            snapshot: levels)
+            snapshot: levels,
+            echo: echo)
     }
 
     /// Le niveau global que vise un geste, ou `nil` s'il n'y a rien à viser.
@@ -341,12 +347,12 @@ extension MiloAPIClient {
     ///
     /// **Elle ne peut pas se produire ici, et c'est mesuré.** Journal de
     /// l'extension du 22/09/2026, 945 rappels sur 46 minutes et cinq processus,
-    /// rejoués à travers la coalescence de 180 ms : **315 envois sur 315
+    /// rejoués à travers la coalescence (180 ms à l'époque) : **315 envois sur 315
     /// portaient les trois enceintes**. Aucune rafale partielle, aucune rafale
     /// d'une seule enceinte. Et ce n'est pas de justesse — iOS émet ses trois
     /// rappels en **2 ms au pire** (médiane 1 ms), la rafale suivante n'arrive
-    /// jamais avant **212 ms**, et le seuil de 180 ms tombe pile dans ce vide.
-    /// Deux ordres de grandeur de marge de chaque côté.
+    /// jamais avant **212 ms**. Le seuil, passé de 180 à 30 ms le 26/09/2026,
+    /// tombe dans ce vide avec quinze fois la durée d'une rafale de marge.
     ///
     /// Ne pas « corriger » ça sans avoir d'abord remesuré ce ratio. Mémoriser
     /// les cibles du geste pour combler les absentes a été essayé deux fois et
@@ -378,7 +384,7 @@ extension MiloAPIClient {
     /// chaque échec repassait en écritures par enceinte, qui écartent les pièces
     /// un peu plus à chaque geste. Le prix de la règle courte est qu'un geste
     /// sur un seul curseur pendant qu'un autre bouge serait lu comme global ;
-    /// il faudrait deux doigts sur deux poignées à moins de 180 ms d'écart.
+    /// il faudrait deux doigts sur deux poignées à moins de 30 ms d'écart.
     static func isGlobalGesture(touched: Int, deviceCount: Int) -> Bool {
         deviceCount >= 2 && touched >= 2
     }
@@ -623,9 +629,20 @@ private actor VolumeGesture {
     private var snapshot: [String: Double] = [:]
     private var flush: Task<Bool, Never>?
 
-    /// Assez long pour absorber une rafale, assez court pour que le son suive le
-    /// doigt d'assez près.
-    private static let quietPeriod = Duration.milliseconds(180)
+    /// Ce qui fait relire `devices` à la session, celui du dernier rappel.
+    private var echo: (@Sendable () async -> Void)?
+
+    /// Assez long pour absorber une rafale, et pas davantage : cette attente
+    /// retarde le son **et** le curseur de la carte.
+    ///
+    /// Elle ne sert qu'à réunir les rappels d'une même rafale — un par
+    /// enceinte, émis en **2 ms au pire** (médiane 1 ms) — pour en faire un seul
+    /// envoi global. Elle n'a jamais réuni deux rafales : la suivante n'arrive
+    /// pas avant **212 ms** (315 envois relus le 22/09/2026). Elle valait
+    /// 180 ms, soit 180 ms de retard sur chaque appui pour rien de plus que
+    /// ce que 30 ms font déjà, avec quinze fois la rafale la plus longue de
+    /// marge.
+    private static let quietPeriod = Duration.milliseconds(30)
 
     /// Programme l'écriture, **et l'attend**.
     ///
@@ -654,9 +671,11 @@ private actor VolumeGesture {
     ///
     /// Rend ce que rend `send`, ou `false` quand une rafale plus récente a
     /// annulé cette tâche avant qu'elle parte.
-    func record(mac: String, target: Double, snapshot: [String: Double]) async -> Bool {
+    func record(mac: String, target: Double, snapshot: [String: Double],
+                echo: @escaping @Sendable () async -> Void) async -> Bool {
         pending[mac] = target
         self.snapshot = snapshot
+        self.echo = echo
 
         flush?.cancel()
         let task = Task { [weak self] () -> Bool in
@@ -708,6 +727,7 @@ private actor VolumeGesture {
             noteShift(shown: shown, to: target, from: mean)
             MiloAPIClient.trace?(
                 "geste global → \(Self.rounded(target)) (\(seen.count)/\(shown.count))")
+            announce()
 
             let applied = await MiloAPIClient.writeGlobalVolume(level: target)
 
@@ -736,6 +756,7 @@ private actor VolumeGesture {
             MiloAPIClient.noteOptimistic(mac: mac, level: target)
         }
         MiloAPIClient.trace?("par enceinte (\(entries.count)/\(shown.count))")
+        announce()
         await withTaskGroup(of: Void.self) { group in
             for (mac, target) in entries {
                 group.addTask {
@@ -752,6 +773,23 @@ private actor VolumeGesture {
             }
         }
         return !Task.isCancelled && generation == mine
+    }
+
+    /// Fait relire les niveaux optimistes qu'on vient de poser, sans attendre
+    /// Milō.
+    ///
+    /// Ici et pas à l'entrée du rappel : la rafale est alors complète. Relire
+    /// après le premier de ses trois rappels rendrait une enceinte à sa cible
+    /// et les deux autres à leur niveau d'avant, et les rappels suivants
+    /// pourraient porter cet instantané bancal — la moyenne de `noteShift`
+    /// serait fausse.
+    ///
+    /// Non attendu : l'écriture n'a pas à patienter derrière le fil principal,
+    /// et le processus vit de toute façon jusqu'à la fin de l'envoi, que
+    /// l'appelant attend.
+    private func announce() {
+        guard let echo else { return }
+        Task { await echo() }
     }
 
     /// Cet envoi est-il toujours le dernier parti ?
