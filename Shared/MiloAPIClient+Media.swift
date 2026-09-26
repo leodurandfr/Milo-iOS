@@ -302,30 +302,19 @@ extension MiloAPIClient {
     /// `snapshot` est ce que nous avons rendu au système pour **toutes** les
     /// enceintes, pas seulement celle-ci : il faut les autres pour reconstituer
     /// la moyenne qu'un geste global vise, y compris quand la rafale ne les a
-    /// pas toutes touchées. Sans l'écart de confirmation : voir `baseLevel`.
-    ///
-    /// Rend `true` si c'est cet appel qui a posé des niveaux optimistes et mené
-    /// son écriture à terme, `false` s'il a été absorbé par une rafale plus
-    /// récente ou n'avait rien à envoyer : seul le premier a quelque chose de
-    /// neuf à faire relire.
-    ///
-    /// `echo` est appelé dès que les niveaux optimistes de la rafale sont
-    /// posés, **avant** l'aller-retour réseau : c'est ce qui fait suivre le
-    /// curseur de la carte sans attendre Milō. Voir `VolumeGesture.send`.
+    /// pas toutes touchées.
     static func applyVolume(mac: String, to target: Float,
-                            snapshot: [String: Float],
-                            echo: @escaping @Sendable () async -> Void) async -> Bool {
+                            snapshot: [String: Float]) async {
         var levels: [String: Double] = [:]
         for (id, level) in snapshot {
             levels[id.replacingOccurrences(of: ":", with: "")] =
                 min(max(Double(level), 0), 1)
         }
 
-        return await VolumeGesture.shared.record(
+        await VolumeGesture.shared.record(
             mac: mac.replacingOccurrences(of: ":", with: ""),
             target: min(max(Double(target), 0), 1),
-            snapshot: levels,
-            echo: echo)
+            snapshot: levels)
     }
 
     /// Le niveau global que vise un geste, ou `nil` s'il n'y a rien à viser.
@@ -347,12 +336,12 @@ extension MiloAPIClient {
     ///
     /// **Elle ne peut pas se produire ici, et c'est mesuré.** Journal de
     /// l'extension du 22/09/2026, 945 rappels sur 46 minutes et cinq processus,
-    /// rejoués à travers la coalescence (180 ms à l'époque) : **315 envois sur 315
+    /// rejoués à travers la coalescence de 180 ms : **315 envois sur 315
     /// portaient les trois enceintes**. Aucune rafale partielle, aucune rafale
     /// d'une seule enceinte. Et ce n'est pas de justesse — iOS émet ses trois
     /// rappels en **2 ms au pire** (médiane 1 ms), la rafale suivante n'arrive
-    /// jamais avant **212 ms**. Le seuil, passé de 180 à 30 ms le 26/09/2026,
-    /// tombe dans ce vide avec quinze fois la durée d'une rafale de marge.
+    /// jamais avant **212 ms**, et le seuil de 180 ms tombe pile dans ce vide.
+    /// Deux ordres de grandeur de marge de chaque côté.
     ///
     /// Ne pas « corriger » ça sans avoir d'abord remesuré ce ratio. Mémoriser
     /// les cibles du geste pour combler les absentes a été essayé deux fois et
@@ -384,7 +373,7 @@ extension MiloAPIClient {
     /// chaque échec repassait en écritures par enceinte, qui écartent les pièces
     /// un peu plus à chaque geste. Le prix de la règle courte est qu'un geste
     /// sur un seul curseur pendant qu'un autre bouge serait lu comme global ;
-    /// il faudrait deux doigts sur deux poignées à moins de 30 ms d'écart.
+    /// il faudrait deux doigts sur deux poignées à moins de 180 ms d'écart.
     static func isGlobalGesture(touched: Int, deviceCount: Int) -> Bool {
         deviceCount >= 2 && touched >= 2
     }
@@ -490,59 +479,6 @@ extension MiloAPIClient {
         min(max(raw, renderedFloor), 1)
     }
 
-    /// Écart entre ce qu'on confirme au système et ce qu'il a demandé.
-    ///
-    /// Cinq dix-millièmes de la course, soit 0,035 dB sur -78…-8 : inaudible, et
-    /// invisible sur un curseur.
-    static let acknowledgedOffset = 0.0005
-
-    /// Le niveau à rendre pour une enceinte : ce qu'on vient de demander tant que
-    /// c'est frais, sinon ce que Milō rapporte — puis le plancher.
-    ///
-    /// **Une valeur fraîche n'est jamais rendue telle quelle**, et ce n'est pas du
-    /// bruit : c'est ce qui fait suivre le curseur de la carte aux boutons
-    /// physiques. Mesuré le 26/09/2026, trois enceintes au même niveau, écran
-    /// verrouillé : six appuis à −1/16 arrivent bien, l'extension rend bien
-    /// 0,477 → … → 0,165 après chaque push, et le curseur reste à 0,54 — si bien
-    /// que le doigt, en le touchant, remonte le son d'un coup à 0,5398643, la
-    /// valeur exacte d'avant les appuis. Un changement venu du Mac, lui, le
-    /// recale aussitôt.
-    ///
-    /// Ce qui ne remonte pas, c'est une valeur **égale à celle que le système
-    /// vient de demander** : il la tient déjà pour sa copie du modèle, n'y voit
-    /// aucun changement, et ne prévient pas la carte. Or la valeur optimiste
-    /// *est* la cible demandée. Un écart minuscule suffit à en faire une
-    /// nouvelle valeur. Il va vers le haut, et vers le bas seulement là où il
-    /// dépasserait 1,0 : l'ordre des niveaux est préservé partout sauf dans ce
-    /// dernier demi-millième. Une première version basculait à 0,5 et
-    /// intervertissait deux enceintes de part et d'autre.
-    ///
-    /// Cet écart est **affiché**, jamais **calculé** : l'instantané qui sert à
-    /// reconstituer un geste global part de `baseLevel`. Parti du niveau
-    /// affiché, `noteShift` l'aurait rangé dans la valeur optimiste, et le rendu
-    /// suivant l'aurait ajouté une seconde fois — un écart qui grossit à chaque
-    /// rafale pour deux enceintes de part et d'autre de la butée.
-    ///
-    /// Ce que la panne coûtait en plus de l'affichage : le curseur maître
-    /// multiplie les niveaux par (position ÷ position affichée). Une carte restée
-    /// en haut pendant que les enceintes étaient descendues à 0,0855 ramenait
-    /// toute sa course à 0…0,0855, soit -78…-72 dB — chaque appui vers le haut
-    /// ajoutait de moins en moins et plafonnait là (mesuré à 12:30 le même jour).
-    ///
-    /// Pure, et partagée entre l'extension et l'app : deux définitions du niveau
-    /// rendu donneraient deux bases au même curseur.
-    static func displayedLevel(optimistic: Double?, reported: Double) -> Double {
-        guard let optimistic else { return renderedLevel(reported) }
-        let raised = optimistic + acknowledgedOffset
-        return renderedLevel(raised <= 1 ? raised : optimistic - acknowledgedOffset)
-    }
-
-    /// Le même niveau, sans l'écart de confirmation : celui sur lequel se
-    /// calcule un geste. Voir `displayedLevel`.
-    static func baseLevel(optimistic: Double?, reported: Double) -> Double {
-        renderedLevel(optimistic ?? reported)
-    }
-
     /// Oublie ce qu'on avait promis pour ces enceintes.
     ///
     /// À n'appeler que quand l'écriture a échoué. Sans cela, l'affichage tient
@@ -627,22 +563,11 @@ private actor VolumeGesture {
     /// de l'autre côté d'un await sur lequel l'acteur est réentrant, et c'est
     /// `generation` qui l'empêche de reposer un instantané d'avant.
     private var snapshot: [String: Double] = [:]
-    private var flush: Task<Bool, Never>?
+    private var flush: Task<Void, Never>?
 
-    /// Ce qui fait relire `devices` à la session, celui du dernier rappel.
-    private var echo: (@Sendable () async -> Void)?
-
-    /// Assez long pour absorber une rafale, et pas davantage : cette attente
-    /// retarde le son **et** le curseur de la carte.
-    ///
-    /// Elle ne sert qu'à réunir les rappels d'une même rafale — un par
-    /// enceinte, émis en **2 ms au pire** (médiane 1 ms) — pour en faire un seul
-    /// envoi global. Elle n'a jamais réuni deux rafales : la suivante n'arrive
-    /// pas avant **212 ms** (315 envois relus le 22/09/2026). Elle valait
-    /// 180 ms, soit 180 ms de retard sur chaque appui pour rien de plus que
-    /// ce que 30 ms font déjà, avec quinze fois la rafale la plus longue de
-    /// marge.
-    private static let quietPeriod = Duration.milliseconds(30)
+    /// Assez long pour absorber une rafale, assez court pour que le son suive le
+    /// doigt d'assez près.
+    private static let quietPeriod = Duration.milliseconds(180)
 
     /// Programme l'écriture, **et l'attend**.
     ///
@@ -668,38 +593,26 @@ private actor VolumeGesture {
     /// le chemin par enceinte l'écart se referme au geste suivant. Le corriger
     /// demanderait de ne retirer de `pending` que ce qui est réellement parti,
     /// ce qui n'a pas paru valoir le risque tant que le geste maître aboutit.
-    ///
-    /// Rend ce que rend `send`, ou `false` quand une rafale plus récente a
-    /// annulé cette tâche avant qu'elle parte.
-    func record(mac: String, target: Double, snapshot: [String: Double],
-                echo: @escaping @Sendable () async -> Void) async -> Bool {
+    func record(mac: String, target: Double, snapshot: [String: Double]) async {
         pending[mac] = target
         self.snapshot = snapshot
-        self.echo = echo
 
         flush?.cancel()
-        let task = Task { [weak self] () -> Bool in
+        let task = Task { [weak self] in
             try? await Task.sleep(for: Self.quietPeriod)
-            guard !Task.isCancelled, let self else { return false }
-            return await self.send()
+            guard !Task.isCancelled else { return }
+            await self?.send()
         }
         flush = task
-        return await task.value
+        await task.value
     }
 
     /// Une rafale coalescée part d'ici, et d'ici seulement.
-    ///
-    /// Rend `true` quand cet envoi a posé des niveaux optimistes et qu'aucun
-    /// plus récent ne l'a remplacé en route — y compris sur un échec, où
-    /// l'affichage vient d'être rendu à Milō : dans les deux cas il y a du neuf
-    /// à relire. `false` quand il n'y avait rien à envoyer, ou qu'une rafale
-    /// plus récente a pris la main pendant l'aller-retour : faire relire alors
-    /// rendrait en plein geste des niveaux déjà dépassés.
-    private func send() async -> Bool {
+    private func send() async {
         let entries = pending
         let shown = snapshot
         pending = [:]
-        guard !entries.isEmpty, !shown.isEmpty else { return false }
+        guard !entries.isEmpty, !shown.isEmpty else { return }
 
         generation &+= 1
         let mine = generation
@@ -727,7 +640,6 @@ private actor VolumeGesture {
             noteShift(shown: shown, to: target, from: mean)
             MiloAPIClient.trace?(
                 "geste global → \(Self.rounded(target)) (\(seen.count)/\(shown.count))")
-            announce()
 
             let applied = await MiloAPIClient.writeGlobalVolume(level: target)
 
@@ -735,7 +647,7 @@ private actor VolumeGesture {
             // propres niveaux et lancé sa propre écriture. Toucher à quoi que
             // ce soit ici l'écraserait avec un instantané d'avant, et la base
             // rendue au système reculerait en plein geste.
-            guard !Task.isCancelled, generation == mine else { return false }
+            guard !Task.isCancelled, generation == mine else { return }
 
             guard let applied else {
                 // Sans cette branche, l'affichage tenait trois secondes pleines
@@ -743,20 +655,19 @@ private actor VolumeGesture {
                 // que la lecture du niveau appliqué existe pour éviter.
                 MiloAPIClient.forgetOptimistic(macs: Array(shown.keys))
                 MiloAPIClient.trace?("global échoué, affichage rendu à Milō")
-                return true
+                return
             }
             if abs(applied - target) > 0.001 {
                 noteShift(shown: shown, to: applied, from: mean)
                 MiloAPIClient.trace?("global appliqué → \(Self.rounded(applied))")
             }
-            return true
+            return
         }
 
         for (mac, target) in entries {
             MiloAPIClient.noteOptimistic(mac: mac, level: target)
         }
         MiloAPIClient.trace?("par enceinte (\(entries.count)/\(shown.count))")
-        announce()
         await withTaskGroup(of: Void.self) { group in
             for (mac, target) in entries {
                 group.addTask {
@@ -772,24 +683,6 @@ private actor VolumeGesture {
                 }
             }
         }
-        return !Task.isCancelled && generation == mine
-    }
-
-    /// Fait relire les niveaux optimistes qu'on vient de poser, sans attendre
-    /// Milō.
-    ///
-    /// Ici et pas à l'entrée du rappel : la rafale est alors complète. Relire
-    /// après le premier de ses trois rappels rendrait une enceinte à sa cible
-    /// et les deux autres à leur niveau d'avant, et les rappels suivants
-    /// pourraient porter cet instantané bancal — la moyenne de `noteShift`
-    /// serait fausse.
-    ///
-    /// Non attendu : l'écriture n'a pas à patienter derrière le fil principal,
-    /// et le processus vit de toute façon jusqu'à la fin de l'envoi, que
-    /// l'appelant attend.
-    private func announce() {
-        guard let echo else { return }
-        Task { await echo() }
     }
 
     /// Cet envoi est-il toujours le dernier parti ?

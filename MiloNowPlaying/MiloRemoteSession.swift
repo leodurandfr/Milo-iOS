@@ -61,16 +61,6 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     let id: String
     private(set) var attributes: MiloSessionAttributes
 
-    /// Incrémenté quand une écriture de volume est partie, et lu par `devices`
-    /// pour cette seule raison : c'est ce qui fait relire les niveaux aussitôt.
-    ///
-    /// Sans lui rien d'observable ne change à la fin d'un rappel — les valeurs
-    /// optimistes vivent dans le conteneur partagé — et `devices` n'était relu
-    /// qu'au push suivant de Milō, 0,5 à 1,2 s plus tard, ou jamais quand le
-    /// niveau n'avait pas bougé (en butée). Incrémenté deux fois par geste :
-    /// dès que la rafale est réunie, puis à la fin de l'écriture.
-    private var volumeEcho: UInt = 0
-
     init(attributes: MiloSessionAttributes) {
         self.id = attributes.id
         self.attributes = attributes
@@ -519,7 +509,6 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// contre l'encodeur rotatif de l'appareil.
     var devices: [MediaDevice] {
         miloLog.info("devices lu : \(self.attributes.devices.count, privacy: .public) enceinte(s)")
-        _ = volumeEcho
 
         // Dédupliqué avant tout le reste. `attributes.devices` est un simple
         // tableau décodé d'un payload APNs : rien ne garantit que Milō n'y
@@ -532,10 +521,7 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             .filter { identifiers.insert($0.id).inserted }
             .reversed()
 
-        let shown = unique.map { device in
-            let (level, base) = Self.displayedVolume(device)
-            return (device: device, level: level, base: base)
-        }
+        let shown = unique.map { (device: $0, level: Self.displayedVolume($0)) }
 
         // Ce que le système a sous les yeux, figé ici et passé en entier à
         // chaque rappel. Il en faut l'ensemble, pas seulement un compte : le
@@ -549,9 +535,7 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         // impossible, et c'est précisément pour ça qu'on ne veut pas d'un trap
         // ici — il n'y aurait plus rien pour l'attraper si elle cessait de
         // l'être. Même règle que la déduplication : la dernière l'emporte.
-        // `base` et non `level` : l'écart de confirmation s'affiche, il ne se
-        // calcule pas — voir `MiloAPIClient.displayedLevel`.
-        let snapshot = Dictionary(shown.map { ($0.device.id, $0.base) },
+        let snapshot = Dictionary(shown.map { ($0.device.id, $0.level) },
                                   uniquingKeysWith: { _, last in last })
 
         // Tracée quand elle change : sans elle au journal, le facteur que le
@@ -560,37 +544,21 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
             .map { "\($0.device.id)=\(((($0.level * 10000).rounded()) / 10000))" }
             .joined(separator: " "))
 
-        return shown.map { device, level, _ in
+        return shown.map { device, level in
             MediaDevice(
                 id: device.id,
                 name: device.name,
                 type: Self.deviceType(device.type),
                 capabilities: [
-                    .absoluteVolume(level) { [weak self] newLevel in
+                    .absoluteVolume(level) { newLevel in
                         // Tracé AVANT le réseau : « rien ne se passe » ne
                         // distingue pas une fermeture jamais appelée d'une
                         // requête qui échoue, et ce sont deux causes opposées.
                         miloLog.info("RAPPEL VOLUME \(device.id, privacy: .public) -> \(newLevel, privacy: .public)")
                         Self.trace("onChange \(device.id) -> \(newLevel)")
-                        let echo: @Sendable () async -> Void = {
-                            await MainActor.run { self?.volumeEcho &+= 1 }
-                        }
-                        // Première relecture dès que la rafale est réunie,
-                        // avant le réseau : c'est elle qui fait suivre le
-                        // curseur. La seconde, ici, montre ce que l'écriture a
-                        // changé — un niveau borné par Milō, ou l'affichage
-                        // rendu à Milō sur un échec.
-                        let sent = await MiloAPIClient.applyVolume(mac: device.id,
-                                                                   to: newLevel,
-                                                                   snapshot: snapshot,
-                                                                   echo: echo)
-                        // Seul le rappel dont l'envoi est allé au bout fait
-                        // relire : un rappel absorbé par la rafale suivante, ou
-                        // doublé par elle pendant l'aller-retour, rendrait en
-                        // plein geste des niveaux déjà dépassés, donc une base
-                        // périmée pour le facteur suivant.
-                        guard sent else { return }
-                        await echo()
+                        await MiloAPIClient.applyVolume(mac: device.id,
+                                                        to: newLevel,
+                                                        snapshot: snapshot)
                     }
                 ]
             )
@@ -620,20 +588,9 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// Le plancher n'est pas cosmétique : le curseur maître **multiplie** ce
     /// qu'on lui rend, et zéro le rend inerte pour toujours. Voir
     /// `MiloAPIClient.renderedLevel`.
-    ///
-    /// Et la valeur optimiste n'est pas rendue bit à bit : le système ignore
-    /// un niveau égal à celui qu'il vient de demander, et le curseur de la
-    /// carte ne suivait plus les boutons physiques. Voir
-    /// `MiloAPIClient.displayedLevel`. D'où les deux valeurs : celle qu'on
-    /// montre, et `base`, la même sans cet écart, sur laquelle se calcule un
-    /// geste.
-    private static func displayedVolume(
-        _ device: MiloSessionAttributes.Device
-    ) -> (level: Float, base: Float) {
-        let optimistic = MiloAPIClient.optimisticLevel(mac: device.id)
-        let reported = Double(device.volume)
-        return (Float(MiloAPIClient.displayedLevel(optimistic: optimistic, reported: reported)),
-                Float(MiloAPIClient.baseLevel(optimistic: optimistic, reported: reported)))
+    private static func displayedVolume(_ device: MiloSessionAttributes.Device) -> Float {
+        let raw = MiloAPIClient.optimisticLevel(mac: device.id) ?? Double(device.volume)
+        return Float(MiloAPIClient.renderedLevel(raw))
     }
 
     /// Ce que sont vraiment les octets qu'on s'apprête à rendre.

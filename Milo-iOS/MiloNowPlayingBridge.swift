@@ -661,18 +661,17 @@ enum MiloNowPlayingBridge {
             // Ce qu'on vient de demander l'emporte sur ce que Milō rapporte
             // pendant quelques secondes : sinon cette boucle repousse un niveau
             // lu avant l'écriture, et le curseur recule sous le doigt.
-            let level = MiloAPIClient.displayedLevel(
-                optimistic: MiloAPIClient.optimisticLevel(mac: mac),
-                reported: client?["volume"] as? Double ?? 0)
+            let level = MiloAPIClient.optimisticLevel(mac: mac)
+                ?? client?["volume"] as? Double ?? 0
             return MiloSessionAttributes.Device(
                 id: mac,
                 name: rooms[mac]?["name"] as? String ?? "Milō \(mac.suffix(5))",
                 type: "speaker",
-                // Même règle que `displayedVolume` : deux définitions du
+                // Même plancher que `displayedVolume` : deux définitions du
                 // niveau rendu donneraient deux bases au même curseur selon que
                 // l'app est devant ou endormie, et c'est la base qui décide du
                 // facteur que le système applique.
-                volume: Float(level)
+                volume: Float(MiloAPIClient.renderedLevel(level))
             )
         }
     }
