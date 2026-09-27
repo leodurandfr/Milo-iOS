@@ -17,7 +17,7 @@ struct MiloNowPlayingExtension: RemoteMediaSessionExtension {
         // seul point qui prouve *quel* binaire le système vient de charger.
         // Tracer à l'entrée, jamais à la sortie — un chemin qui échoue en
         // silence se lit sinon comme un chemin jamais pris.
-        miloLog.info("EXTENSION DÉMARRÉE — binaire \(miloBinaryStamp(), privacy: .public)")
+        miloLog.notice("EXTENSION DÉMARRÉE — binaire \(miloBinaryStamp(), privacy: .public)")
 
         // Tout ce qui part vers Milō passe par un chemin lié au Wi-Fi — voir
         // `MiloScopedHTTP`, où la mesure est consignée. Les URL restent en
