@@ -964,6 +964,21 @@ struct GroupVolumeMirrorTests {
         #expect(drag?.kind != .button(up: true))
     }
 
+    /// Un appui qui suit de près un glissement reste un appui : sans quoi un
+    /// seul appui mal lu faisait lire tous les suivants comme des glissements.
+    @Test("Un appui juste après un glissement est encore relu comme un appui")
+    func aPressRightAfterASlideIsStillAPress() {
+        var mirror = GroupVolumeMirror()
+        pushed(&mirror, 0.2)
+        let slide = mirror.interpret(burst: all(0.23), shown: all(0.2), now: 100)
+        #expect(slide?.kind == .slider)
+        mirror.observe(all(0.2305), duringCommand: true)
+
+        // 0,4 s plus tard, iOS part de son dernier G : 0,23 + 1/16.
+        let plus = mirror.interpret(burst: all(0.2925), shown: all(0.23), now: 100.4)
+        #expect(plus?.kind == .button(up: true))
+    }
+
     /// Une lecture suivie bornée à 1 tombe toujours sur un centième : ce n'est
     /// pas une raison de la croire loin du doigt.
     @Test("Une lecture bornée à 1 ne passe pas pour un centième du Centre de contrôle")

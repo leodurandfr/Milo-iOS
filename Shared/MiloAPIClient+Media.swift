@@ -804,8 +804,9 @@ struct GroupVolumeMirror: Codable, Equatable {
     /// près.
     static let buttonTolerance = 0.01
 
-    /// Au-delà, `slack` ne veut plus rien dire : le prochain appui tranchera.
-    static let maxSlack = 0.1
+    /// Au-delà, une marge prendrait les glissements pour des appuis. 5 % couvrent
+    /// les écarts entre enceintes mesurés : 1,35 % à 0,52, 3,4 % à 0,21, 4 % à 0,05.
+    static let maxSlack = 0.05
 
     /// En dessous, un G engagé est nul : iOS n'y perd pas ses rapports
     /// (0,72207 avant et après le zéro de 18:49:42, le 27/09), le miroir non plus.
@@ -831,8 +832,12 @@ struct GroupVolumeMirror: Codable, Equatable {
             ceiling = max(ceiling, level)
             adopted.append(level)
         }
-        // Un niveau adopté remplace sur la carte le dernier G d'iOS, zéro compris.
-        if !unseeded, !adopted.isEmpty { lastSystemLevel = nil }
+        // iOS repart de ce qu'il voit, comme nous.
+        if unseeded { slack = nil }
+        // Un niveau adopté remplace sur la carte le 0 qu'iOS y gardait.
+        if !unseeded, !adopted.isEmpty, let last = lastSystemLevel, last <= Self.silentLevel {
+            lastSystemLevel = nil
+        }
         // Monté au-dessus du plafond : iOS en a pris un entre le plus bas des
         // niveaux montés et le plus haut. Voir `slack`.
         guard !unseeded, ceiling > previousCeiling, let lowest = adopted.min() else { return }
@@ -872,7 +877,7 @@ struct GroupVolumeMirror: Codable, Equatable {
             guard ceiling > 0 else { return nil }
             let reference = reference.merging(display) { known, _ in known }
             let levels = touched.compactMap { id, requested -> Double? in
-                guard let base = reference[id], base > 0.0001 else { return nil }
+                guard let base = reference[id], base > Self.silentLevel else { return nil }
                 return requested * ceiling / base
             }.sorted()
             guard !levels.isEmpty else { return nil }
@@ -896,20 +901,21 @@ struct GroupVolumeMirror: Codable, Equatable {
         // troncature se lit aussi sur l'affiché sans l'écart de confirmation,
         // qui peut faire passer le centième.
         //
-        // Un glissement en cours reste un glissement : d'une rafale à l'autre, le
-        // doigt peut parcourir 1/16 en 212 ms, et la marge des appuis le prendrait
-        // pour un bouton.
+        // Pendant un glissement, la marge stricte : d'une rafale à l'autre, le
+        // doigt peut parcourir 1/16 en 212 ms, et `slack` le prendrait pour un
+        // bouton. Mais on teste quand même : un appui mal lu ne doit pas faire
+        // lire les appuis rapides suivants comme des glissements.
         typealias Match = (hypothesis: Hypothesis, rule: CardRule, up: Bool, level: Double, error: Double)
         var matches: [Match] = []
-        let margin = slack ?? 0
+        let sliding = lastWasSlide == true && now - lastAt < Self.gestureGap
+        let margin = sliding ? 0 : slack ?? 0
         // À zéro, la carte garde le 0 d'iOS tant que rien d'autre n'est adopté :
         // un « − » de plus au plancher ne nous rappelle même pas, et le « + »
         // suivant part de 0 (27/09, 20:40:50 → 20:40:57 : engagé 0,0625).
         let recentSystemLevel = lastSystemLevel.flatMap {
             now - lastAt < Self.systemLevelShownFor || $0 <= Self.silentLevel ? $0 : nil
         }
-        let sliding = lastWasSlide == true && now - lastAt < Self.gestureGap
-        for candidate in hypotheses where !sliding {
+        for candidate in hypotheses {
             for rule in rules {
                 for shownOnCard in [rule.level(display.values), recentSystemLevel].compactMap({ $0 }) {
                 for up in [true, false] {
