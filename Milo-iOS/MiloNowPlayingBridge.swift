@@ -161,9 +161,14 @@ enum MiloNowPlayingBridge {
 
     private static func displaySignature(_ a: MiloSessionAttributes) -> String {
         let track = a.currentTrack
-        let speakers = a.devices
-            .map { "\($0.id)=\(Int(($0.volume * 1000).rounded()))" }
-            .joined(separator: ",")
+        // Les enceintes, pas leurs niveaux. Un changement de volume arrive à la
+        // carte par le push de Milō, 0,2 à 0,35 s après (mesuré le 27/09/2026,
+        // téléphone verrouillé) ; cette boucle, qui relit Milō toutes les deux
+        // secondes, le republiait 0 à 2 s plus tard : 43 `update reçu` pour
+        // 28 pushes, app ouverte, contre 11 pour 11 app suspendue. Au mieux un
+        // doublon, au pire un niveau relu juste avant le changement, qui aurait
+        // ramené la barre en arrière.
+        let speakers = a.devices.map(\.id).joined(separator: ",")
         return [
             a.isPlaying ? "1" : "0",
             track?.id ?? "-",
@@ -663,7 +668,8 @@ enum MiloNowPlayingBridge {
             // lu avant l'écriture, et le curseur recule sous le doigt.
             let level = MiloAPIClient.displayedLevel(
                 optimistic: MiloAPIClient.optimisticLevel(mac: mac),
-                reported: client?["volume"] as? Double ?? 0)
+                reported: client?["volume"] as? Double ?? 0,
+                confirmed: MiloAPIClient.lastRequestedLevel(mac: mac))
             return MiloSessionAttributes.Device(
                 id: mac,
                 name: rooms[mac]?["name"] as? String ?? "Milō \(mac.suffix(5))",

@@ -571,6 +571,18 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         // « appui → la barre a le nouveau niveau ».
         miloLog.notice("devices rendus — \(Self.levelsLine(shown.map { ($0.device.id, $0.level) }), privacy: .public)")
 
+        // Ce qu'iOS lit ici, il le tient pour vu : c'est ce qui fait monter son
+        // plafond caché, et la rafale suivante se relit à partir de là. Voir
+        // `GroupVolumeMirror`.
+        // Tel qu'iOS le reçoit, écart de confirmation compris : c'est ce que la
+        // carte affiche, et un appui part de là.
+        let during = GroupVolumeMirror.commandInFlight
+        GroupVolumeMirror.update {
+            $0.observe(Dictionary(shown.map {
+                ($0.device.id.replacingOccurrences(of: ":", with: ""), Double($0.level))
+            }, uniquingKeysWith: { _, last in last }), duringCommand: during)
+        }
+
         return shown.map { device, level, _ in
             MediaDevice(
                 id: device.id,
@@ -578,6 +590,10 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                 type: Self.deviceType(device.type),
                 capabilities: [
                     .absoluteVolume(level) { [weak self] newLevel in
+                        // Ce que `devices` rend d'ici au retour, iOS l'affiche
+                        // sans l'adopter : le miroir doit le savoir.
+                        GroupVolumeMirror.beginCommand()
+                        defer { GroupVolumeMirror.endCommand() }
                         // Tracé AVANT le réseau : « rien ne se passe » ne
                         // distingue pas une fermeture jamais appelée d'une
                         // requête qui échoue, et ce sont deux causes opposées.
@@ -633,9 +649,12 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         _ device: MiloSessionAttributes.Device
     ) -> (level: Float, base: Float) {
         let optimistic = MiloAPIClient.optimisticLevel(mac: device.id)
+        let confirmed = MiloAPIClient.lastRequestedLevel(mac: device.id)
         let reported = Double(device.volume)
-        return (Float(MiloAPIClient.displayedLevel(optimistic: optimistic, reported: reported)),
-                Float(MiloAPIClient.baseLevel(optimistic: optimistic, reported: reported)))
+        return (Float(MiloAPIClient.displayedLevel(optimistic: optimistic, reported: reported,
+                                                   confirmed: confirmed)),
+                Float(MiloAPIClient.baseLevel(optimistic: optimistic, reported: reported,
+                                              confirmed: confirmed)))
     }
 
     /// Ce que sont vraiment les octets qu'on s'apprête à rendre.

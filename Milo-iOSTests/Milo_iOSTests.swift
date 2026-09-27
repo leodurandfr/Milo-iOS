@@ -570,3 +570,249 @@ struct TrackIDTests {
         #expect(C.skip(by: -15).name(forSource: "podcast") == "skip")
     }
 }
+
+/// Le plafond caché d'iOS sous le curseur principal, et la relecture des rafales.
+///
+/// Chaque séquence est relevée sur l'iPhone (journaux de `mediaremoted`, 26 et
+/// 27/09/2026) : les niveaux rendus — hors commande ou pendant une commande —,
+/// puis ce qu'iOS a demandé pour un appui. Le modèle doit retrouver le G engagé,
+/// le sens de l'appui, et le niveau voulu.
+struct GroupVolumeMirrorTests {
+
+    func all(_ level: Double) -> [String: Double] { ["a": level, "b": level, "c": level] }
+
+    func close(_ a: Double?, _ b: Double, _ tolerance: Double = 0.0002) -> Bool {
+        guard let a else { return false }
+        return abs(a - b) < tolerance
+    }
+
+    /// Des niveaux rendus hors de toute commande d'iOS : un push de Milō.
+    func pushed(_ mirror: inout GroupVolumeMirror, _ levels: Double...) {
+        for level in levels { mirror.observe(all(level), duringCommand: false) }
+    }
+
+    /// 27/09, 01:21:36 → 01:21:44 : baissé ailleurs à 0,0278 sous un plafond
+    /// de 0,1569, puis « + », « + », « − ». Le rendu corrigé du premier « + »
+    /// (0,0908) arrive pendant la commande : la carte l'affiche, iOS ne l'adopte
+    /// pas. Le lire comme adopté faisait prendre le second « + » pour un « − ».
+    @Test("Ce qu'iOS affiche sans l'adopter : « + », « + », « − » relus justes")
+    func renderedDuringACommandIsNotAdopted() {
+        var mirror = GroupVolumeMirror()
+        pushed(&mirror, 0.1569, 0.1135, 0.0278)
+
+        let first = mirror.interpret(burst: all(0.016), shown: all(0.0278), now: 100)
+        #expect(first?.kind == .button(up: true))
+        #expect(close(first?.systemLevel, 0.0903))
+        mirror.observe(all(0.0908), duringCommand: true)
+
+        let second = mirror.interpret(burst: all(0.027162), shown: all(0.0903), now: 101.6)
+        #expect(second?.kind == .button(up: true))
+        #expect(close(second?.systemLevel, 0.1533))
+        #expect(close(second?.intended, 0.0903 + 0.0625))
+        mirror.observe(all(0.1533), duringCommand: true)
+
+        let third = mirror.interpret(burst: all(0.016088), shown: all(0.1528), now: 104.4)
+        #expect(third?.kind == .button(up: false))
+        #expect(close(third?.systemLevel, 0.0908))
+    }
+
+    /// 26/09, 17:57 : engagé à 0,6609, puis baissé ailleurs jusqu'à 0,5323. Un
+    /// « − » a posé 0,378385 au lieu de 0,4698.
+    @Test("Baissé ailleurs, un « − » se relit comme « affiché − 1/16 »")
+    func loweredElsewhereThenDown() {
+        var mirror = GroupVolumeMirror()
+        pushed(&mirror, 0.6609, 0.618, 0.4038, 0.4895, 0.5323)
+        #expect(close(mirror.ceiling, 0.6609))
+
+        let reading = mirror.interpret(burst: all(0.378385), shown: all(0.5323), now: 100)
+        #expect(reading?.kind == .button(up: false))
+        #expect(close(reading?.intended, 0.4698))
+        #expect(close(reading?.targets["a"], 0.4698))
+    }
+
+    /// 26/09, 20:03 : un plafond resté à 0,45 depuis 27 minutes, le son à
+    /// 0,1214. Un « + » a demandé 0,0496 : le son a baissé.
+    @Test("Sous un plafond resté haut, un « + » monte au lieu de baisser")
+    func plusNoLongerLowers() {
+        var mirror = GroupVolumeMirror()
+        pushed(&mirror, 0.45, 0.1214)
+
+        let reading = mirror.interpret(burst: all(0.049612), shown: all(0.1214), now: 100)
+        #expect(reading?.kind == .button(up: true))
+        #expect(close(reading?.systemLevel, 0.1839))
+        #expect(close(reading?.intended, 0.1839))
+        #expect(close(mirror.ceiling, 0.1839))
+        #expect(close(mirror.reference["a"], 0.049612, 0.000001))
+    }
+
+    /// 26/09, 17:48 : le plafond est la valeur externe la plus haute (0,6177),
+    /// pas le dernier G engagé (0,5748).
+    @Test("Le plafond monte avec un niveau vu plus haut que lui")
+    func theCeilingRisesWithAHigherLevel() {
+        var mirror = GroupVolumeMirror()
+        pushed(&mirror, 0.5748, 0.6177, 0.5748, 0.5319)
+        #expect(close(mirror.ceiling, 0.6177))
+
+        let reading = mirror.interpret(burst: all(0.404199), shown: all(0.5319), now: 100)
+        #expect(reading?.kind == .button(up: false))
+        #expect(close(reading?.intended, 0.4694))
+    }
+
+    @Test("iOS sain : la correction vaut exactement 1")
+    func aHealthySystemIsLeftAlone() {
+        var mirror = GroupVolumeMirror()
+        pushed(&mirror, 0.3205)
+        let reading = mirror.interpret(burst: all(0.383), shown: all(0.3205), now: 100)
+        #expect(reading?.kind == .button(up: true))
+        #expect(close(reading?.targets["b"], 0.383, 0.001))
+    }
+
+    /// iOS a recréé son point d'accès sans qu'on le sache : il repart de ce
+    /// qu'il affiche. Lire avec le plafond suivi donnerait 0,68.
+    @Test("Une remise à zéro d'iOS passée inaperçue ne fait pas sauter le son")
+    func anUnseenResetDoesNotOvershoot() {
+        var mirror = GroupVolumeMirror()
+        pushed(&mirror, 0.45, 0.1214)
+
+        let reading = mirror.interpret(burst: all(0.1839), shown: all(0.1214), now: 100)
+        #expect(reading?.hypothesis == "saine")
+        #expect(close(reading?.intended, 0.1839))
+    }
+
+    @Test("Un glissement sous un plafond resté haut suit le doigt")
+    func aSlideFollowsTheFinger() {
+        var mirror = GroupVolumeMirror()
+        pushed(&mirror, 0.45, 0.1214)
+
+        // Le doigt part de 0,1214 et passe à 0,15 : iOS demande 0,1214 × 0,15 / 0,45.
+        let first = mirror.interpret(burst: all(0.04047), shown: all(0.1214), now: 100)
+        #expect(first?.kind == .slider)
+        #expect(close(first?.intended, 0.15, 0.001))
+        mirror.observe(all(0.1505), duringCommand: true)
+
+        // 250 ms plus tard, à 0,20 : iOS part de ce qu'il a posé (0,04047) et de 0,15.
+        let second = mirror.interpret(burst: all(0.05396), shown: all(0.15), now: 100.25)
+        #expect(second?.kind == .slider)
+        #expect(close(second?.intended, 0.20, 0.001))
+    }
+
+    /// Une seule enceinte : son curseur de pièce pose une valeur telle quelle,
+    /// qu'il ne faut pas multiplier par le plafond.
+    @Test("Le curseur de pièce d'une enceinte seule n'est pas multiplié")
+    func aSingleSpeakerRoomSliderIsNotScaled() {
+        var mirror = GroupVolumeMirror()
+        mirror.observe(["a": 0.45], duringCommand: false)
+        mirror.observe(["a": 0.1214], duringCommand: false)
+
+        let reading = mirror.interpret(burst: ["a": 0.13], shown: ["a": 0.1214], now: 100)
+        #expect(close(reading?.intended, 0.13))
+    }
+
+    @Test("Un « − » tout en bas pose zéro")
+    func downAtTheBottomIsZero() {
+        var mirror = GroupVolumeMirror()
+        pushed(&mirror, 0.054)
+        let reading = mirror.interpret(burst: all(0), shown: all(0.054), now: 100)
+        #expect(reading?.kind == .button(up: false))
+        #expect(reading?.intended == 0)
+    }
+
+    @Test("Hors commande, un vrai changement est adopté ; un rendu inchangé, non")
+    func onlyAChangeOutsideACommandIsAdopted() {
+        var mirror = GroupVolumeMirror()
+        pushed(&mirror, 0.45, 0.1214)
+        _ = mirror.interpret(burst: all(0.049612), shown: all(0.1214), now: 100)
+        mirror.observe(all(0.1844), duringCommand: true)
+        #expect(close(mirror.reference["a"], 0.049612, 0.000001))
+        #expect(close(mirror.card["a"], 0.1844, 0.000001))
+
+        // Le push de Milō confirme le même niveau : rien ne bouge pour iOS.
+        mirror.observe(all(0.1844), duringCommand: false)
+        #expect(close(mirror.reference["a"], 0.049612, 0.000001))
+
+        // Un changement fait ailleurs, lui, devient la référence.
+        mirror.observe(all(0.3), duringCommand: false)
+        #expect(close(mirror.reference["a"], 0.3, 0.000001))
+        #expect(close(mirror.ceiling, 0.3, 0.000001))
+    }
+
+    /// 27/09, 02:02:36 : cinq « + » dans le Centre de contrôle engagent
+    /// 0,20 → 0,26 → 0,32 → 0,38 → 0,44 — l'affiché + 1/16, tronqué au centième.
+    @Test("Le Centre de contrôle tronque son pas au centième : c'est encore un bouton")
+    func controlCenterTruncatesItsStep() {
+        var mirror = GroupVolumeMirror()
+        pushed(&mirror, 0.20)
+        mirror.observe(all(0.2005), duringCommand: true)   // notre rendu, écart compris
+
+        let up = mirror.interpret(burst: all(0.26), shown: all(0.20), now: 100)
+        #expect(up?.kind == .button(up: true))
+        #expect(close(up?.systemLevel, 0.26))
+        mirror.observe(all(0.2630), duringCommand: true)
+
+        let down = mirror.interpret(burst: all(0.20), shown: all(0.2625), now: 101)
+        #expect(down?.kind == .button(up: false))
+    }
+
+    /// Un glissement du même Centre de contrôle, relevé à 02:02:45 : aucune de
+    /// ses valeurs ne tombe sur l'affiché ± 1/16 tronqué.
+    @Test("Un glissement du Centre de contrôle reste un glissement")
+    func aControlCenterSlideStaysASlide() {
+        var mirror = GroupVolumeMirror()
+        pushed(&mirror, 0.09)
+        var shown = 0.09
+        var now = 100.0
+        for level in [0.11, 0.19, 0.20, 0.12, 0.09, 0.08, 0.15, 0.19, 0.18, 0.17] {
+            let reading = mirror.interpret(burst: all(level), shown: all(shown), now: now)
+            #expect(reading?.kind == .slider, "\(shown) → \(level)")
+            mirror.observe(all(level + 0.0005), duringCommand: true)
+            shown = level
+            now += 0.25
+        }
+    }
+
+    /// 27/09, 02:07:44 → 02:07:46, déverrouillé : « + » puis trois « − » à
+    /// moins d'une seconde d'écart. iOS part chaque fois de son propre dernier G
+    /// (0,2451 → 0,1826 → 0,1201 → 0,0576), pas de notre rendu, qu'il n'affiche
+    /// qu'au bout d'≈ 1,07 s. Lus comme des glissements, deux de ces appuis
+    /// partaient en niveau absolu : -65 dB, puis -74 dB.
+    @Test("Des appuis rapides partent du dernier G d'iOS, et restent des appuis")
+    func quickPressesStartFromTheLastSystemLevel() {
+        var mirror = GroupVolumeMirror()
+        pushed(&mirror, 0.1826)
+
+        let plus = mirror.interpret(burst: all(0.244273), shown: all(0.1820), now: 100)
+        #expect(plus?.kind == .button(up: true))
+        mirror.observe(all(0.2111), duringCommand: true)
+
+        let first = mirror.interpret(burst: all(0.181978), shown: all(0.2105), now: 100.97)
+        #expect(first?.kind == .button(up: false))
+        mirror.observe(all(0.1825), duringCommand: true)
+
+        let second = mirror.interpret(burst: all(0.119683), shown: all(0.1819), now: 101.55)
+        #expect(second?.kind == .button(up: false))
+        mirror.observe(all(0.1540), duringCommand: true)
+
+        let third = mirror.interpret(burst: all(0.057389), shown: all(0.1535), now: 102.18)
+        #expect(third?.kind == .button(up: false))
+    }
+
+    @Test("Des niveaux inégaux sans règle connue : un glissement n'est pas relu")
+    func unevenSlideIsLeftToTheSystem() {
+        var mirror = GroupVolumeMirror()
+        let shown = ["a": 0.2, "b": 0.4, "c": 0.6]
+        mirror.observe(shown, duringCommand: false)
+        let reading = mirror.interpret(burst: ["a": 0.21, "b": 0.42, "c": 0.63],
+                                       shown: shown, now: 100)
+        #expect(reading == nil)
+    }
+
+    @Test("Ce que Milō confirme se rend à l'identique, écart compris")
+    func aConfirmedLevelKeepsItsOffset() {
+        let kept = MiloAPIClient.displayedLevel(optimistic: nil, reported: 0.1839, confirmed: 0.1839)
+        #expect(close(kept, 0.1844, 0.000001))
+        let fromTheApp = MiloAPIClient.displayedLevel(optimistic: nil, reported: 0.1844, confirmed: 0.1839)
+        #expect(close(fromTheApp, 0.1844, 0.000001))
+        let elsewhere = MiloAPIClient.displayedLevel(optimistic: nil, reported: 0.3, confirmed: 0.1839)
+        #expect(close(elsewhere, 0.3, 0.000001))
+    }
+}
