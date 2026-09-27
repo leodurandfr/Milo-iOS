@@ -68,6 +68,14 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// optimistes vivent dans le conteneur partagé — et `devices` n'était relu
     /// qu'au push suivant de Milō, 0,5 à 1,2 s plus tard, ou jamais quand le
     /// niveau n'avait pas bougé (en butée).
+    ///
+    /// Ce qu'il n'accélère pas : la barre de l'écran verrouillé. MediaRemoteUI
+    /// la redessine 1,00 s après la fin de la commande, quel que soit le moment
+    /// du rendu — mesuré le 27/09/2026 à 18:52, six appuis sur six : niveau
+    /// rendu à +80 ms, affiché à +1,07 s, alors qu'AirPlay et le Centre de
+    /// contrôle suivent tout de suite. Là, la relecture ne sert qu'en butée, où
+    /// aucun push ne vient. Le Centre de contrôle, lui, affiche aussitôt ce
+    /// qu'elle rend.
     private var volumeEcho: UInt = 0
 
     init(attributes: MiloSessionAttributes) {
