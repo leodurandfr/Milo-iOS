@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		C1F00F012E29000F00677FAA /* MiloWidgetExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = C1F001012E29000100677FAA /* MiloWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		C1F00F012E29000F00677FAA /* MiloWidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C1F001012E29000100677FAA /* MiloWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C2A00F012E2A000F00677FAA /* MiloNowPlayingExtension.appex in Embed ExtensionKit Extensions */ = {isa = PBXBuildFile; fileRef = C2A001012E2A000100677FAA /* MiloNowPlayingExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
@@ -43,15 +43,15 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		C1F00E012E29000E00677FAA /* Embed App Extensions */ = {
+		C1F00E012E29000E00677FAA /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				C1F00F012E29000F00677FAA /* MiloWidgetExtension.appex in Embed App Extensions */,
+				C1F00F012E29000F00677FAA /* MiloWidgetExtension.appex in Embed Foundation Extensions */,
 			);
-			name = "Embed App Extensions";
+			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		C2A010012E2A001000677FAA /* Embed ExtensionKit Extensions */ = {
@@ -72,7 +72,7 @@
 		B31D85352E1A632B00677FAA /* Milo-iOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Milo-iOSTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B31D853F2E1A632B00677FAA /* Milo-iOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Milo-iOSUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C1F001012E29000100677FAA /* MiloWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MiloWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		C2A001012E2A000100677FAA /* MiloNowPlayingExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MiloNowPlayingExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		C2A001012E2A000100677FAA /* MiloNowPlayingExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.extensionkit-extension"; includeInIndex = 0; path = MiloNowPlayingExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -221,7 +221,7 @@
 				B31D851B2E1A632900677FAA /* Sources */,
 				B31D851C2E1A632900677FAA /* Frameworks */,
 				B31D851D2E1A632900677FAA /* Resources */,
-				C1F00E012E29000E00677FAA /* Embed App Extensions */,
+				C1F00E012E29000E00677FAA /* Embed Foundation Extensions */,
 				C2A010012E2A001000677FAA /* Embed ExtensionKit Extensions */,
 			);
 			buildRules = (
@@ -343,7 +343,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 1640;
-				LastUpgradeCheck = 1640;
+				LastUpgradeCheck = 2700;
 				TargetAttributes = {
 					B31D851E2E1A632900677FAA = {
 						CreatedOnToolsVersion = 16.4;
@@ -613,6 +613,7 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -670,6 +671,7 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
 			};
