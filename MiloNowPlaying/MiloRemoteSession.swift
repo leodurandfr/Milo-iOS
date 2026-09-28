@@ -615,8 +615,8 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                         // doublé par elle pendant l'aller-retour, rendrait en
                         // plein geste des niveaux déjà dépassés, donc une base
                         // périmée pour le facteur suivant.
-                        guard sent else { return }
-                        await MainActor.run { self?.volumeEcho &+= 1 }
+                        guard sent, let self else { return }
+                        await MainActor.run { self.volumeEcho &+= 1 }
                     }
                 ]
             )
@@ -694,10 +694,10 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// lignes se perdent — et c'est ainsi qu'un geste a paru n'avoir touché que
     /// deux enceintes sur trois alors que les valeurs optimistes, écrites par le
     /// même rappel, portaient bien les trois.
-    private static let traceLock = NSLock()
+    nonisolated private static let traceLock = NSLock()
 
     /// Les secondes ne suffisent pas à ordonner une rafale.
-    private static let traceClock: DateFormatter = {
+    nonisolated private static let traceClock: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss.SSS"
         return f

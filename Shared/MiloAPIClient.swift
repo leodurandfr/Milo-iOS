@@ -106,7 +106,7 @@ struct MiloAPIClient {
     /// - **la sonde** de `MiloRemoteSession`, dont tout l'objet est de mesurer
     ///   ce qu'une connexion neuve obtient. Sur un pool réutilisé elle mesurerait
     ///   le pool.
-    nonisolated(unsafe) static let lan: URLSession = {
+    nonisolated static let lan: URLSession = {
         let configuration = URLSessionConfiguration.default
         // Ne pas attendre un réseau qui n'est pas là : dans une extension, un
         // rappel qui patiente est un rappel que le système tue.
