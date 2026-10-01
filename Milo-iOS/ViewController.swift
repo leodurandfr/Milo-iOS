@@ -191,6 +191,9 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
     override func viewDidLoad() {
         super.viewDidLoad()
         webView.scrollView.contentInsetAdjustmentBehavior = .never
+        // La page dessine elle-même sous la status bar : le fondu d’iOS 26 y
+        // prend la couleur de fond de la page (claire) et voile les vues sombres.
+        webView.scrollView.topEdgeEffect.isHidden = true
         webView.customUserAgent = "Milo-iOS-App/1.0"
         
         // Essayer de se connecter immédiatement
