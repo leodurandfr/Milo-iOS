@@ -177,10 +177,14 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         // la SPA de zéro sans rien apprendre de neuf.
         if isConnected && awayFor < reloadAfterBackgroundInterval {
             hideReconnectingOverlay()
-            return
+        } else {
+            tryConnectToMilo()
         }
 
-        tryConnectToMilo()
+        // Sonder tout de suite plutôt qu'au prochain tour du minuteur : le
+        // réseau a pu changer pendant que le téléphone était verrouillé, et
+        // c'est la sonde qui retire l'overlay quand Milō ne répond pas.
+        checkMiloAndConnect()
     }
 
     func enterBackground() {
@@ -215,8 +219,14 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
     
     func tryConnectToMilo() {
         let url = URL(string: "http://milo.local")!
+        navigationStartedAt = Date()
         webView.load(URLRequest(url: url))
     }
+
+    /// Début de la navigation en cours, pour ne pas couper un chargement
+    /// seulement lent — voir `checkMiloAndConnect`.
+    private var navigationStartedAt = Date.distantPast
+    private let staleNavigationInterval: TimeInterval = 8
     
     /// (Re)programme le sondage de `milo.local` à la cadence de l'état courant.
     func scheduleConnectivityCheck() {
@@ -233,38 +243,90 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         connectivityTimer = timer
     }
     
-    func checkMiloAndConnect() {
-        guard let url = URL(string: "http://milo.local") else { return }
+    /// Ce qu'un sondage apprend de Milō.
+    enum MiloProbe {
+        /// Rien ne répond : Milō est éteint, ou on n'est plus sur son réseau.
+        case unreachable
+        /// nginx répond, le backend pas encore : Milō démarre, ou redémarre.
+        case starting
+        /// Le backend répond : la page peut se charger et sortir de son logo.
+        case ready
+    }
+
+    /// Sonde le backend, pas la page.
+    ///
+    /// nginx sert la page dès qu'il démarre, bien avant le backend. Sonder `/`
+    /// faisait donc charger la page pendant le démarrage de Milō : elle restait
+    /// sur son écran au logo, qui n'attend que l'`initial_state` du WebSocket,
+    /// et dont les reconnexions s'espacent jusqu'à trente secondes — l'app
+    /// semblait bloquée sur le logo de Milō (constaté le 03/10/2026).
+    func probeMilo(completion: @escaping (MiloProbe) -> Void) {
+        guard let url = URL(string: "http://milo.local/api/audio/state") else { return }
 
         var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
         request.timeoutInterval = 2.0
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
 
-        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
-            let isAvailable = error == nil && (response as? HTTPURLResponse)?.statusCode == 200
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            let status = (response as? HTTPURLResponse)?.statusCode
+            // Seuls les codes de passerelle disent « backend absent » : nginx
+            // répond, rien derrière. Tout autre code vient du backend lui-même,
+            // qui est donc là — une route en erreur ne doit pas cacher toute
+            // l'interface derrière « même réseau local ».
+            let probe: MiloProbe
+            switch status {
+            case nil: probe = .unreachable
+            case 502, 503, 504: probe = .starting
+            default: probe = error == nil ? .ready : .unreachable
+            }
+            DispatchQueue.main.async { completion(probe) }
+        }.resume()
+    }
+
+    func checkMiloAndConnect() {
+        probeMilo { [weak self] probe in
+            guard let self = self else { return }
 
             // `Task` : la résolution teste maintenant chaque candidat sur le
             // réseau avant de le retenir, ce qui la rend asynchrone. Détachée du
             // sondage à dessein — l'affichage ci-dessous ne l'attend pas, et
             // c'est déjà ce que faisait l'appel bloquant qu'elle remplace.
-            if isAvailable { Task { await MiloAPIClient.resolveAndCacheIPAddress() } }
+            if probe == .ready { Task { await MiloAPIClient.resolveAndCacheIPAddress() } }
 
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-
-                if isAvailable && !self.isConnected {
-                    // Milō répond sans que sa page soit affichée → (re)charger, sauf si
-                    // une navigation est déjà en vol : la relancer l'annulerait et
-                    // ferait repartir le chargement à chaque sondage.
-                    if !self.webView.isLoading { self.tryConnectToMilo() }
-                } else if !isAvailable && self.isConnected {
-                    // milo.local pas disponible mais on était connecté → afficher erreur
-                    self.isConnected = false
-                    self.showErrorView()
-                }
+            if probe == .ready && !self.isConnected {
+                // Milō répond sans que sa page soit affichée → (re)charger, sauf si
+                // une navigation est déjà en vol : la relancer l'annulerait et
+                // ferait repartir le chargement à chaque sondage.
+                if !self.webView.isLoading { self.tryConnectToMilo() }
+            } else if probe == .unreachable || (probe == .starting && !self.isConnected) {
+                // Un backend qui redémarre sous une page affichée (`.starting`,
+                // connecté) ne compte pas : la page gère elle-même sa reconnexion.
+                self.isConnected = false
+                self.showMiloUnavailable()
             }
-        }.resume()
+        }
+    }
+
+    /// Milō absent : l'erreur, sans attendre la navigation en vol.
+    ///
+    /// Sans Wi-Fi, elle peut traîner une minute sur la résolution de
+    /// `milo.local`, et seule sa fin retirait l'overlay au logo posé au
+    /// verrouillage — on restait sur le logo, sans message (constaté le
+    /// 03/10/2026).
+    private func showMiloUnavailable() {
+        // Arrêtée passé un délai seulement : un chargement juste lent aboutirait,
+        // et `didFinish` montrera la page. Une navigation qui traîne, elle,
+        // bloque le rechargement — `checkMiloAndConnect` attend `!isLoading`.
+        if webView.isLoading, Date().timeIntervalSince(navigationStartedAt) > staleNavigationInterval {
+            webView.stopLoading()
+        }
+        // Un verdict est tombé : sans ça, un premier chargement arrêté ici
+        // laisserait `handleReturnFromBackground` sortir à chaque retour,
+        // overlay compris.
+        hasCompletedFirstLoad = true
+        initialErrorTimer?.invalidate()
+        hideReconnectingOverlay()
+        showErrorView()
     }
     
     func showErrorView() {
@@ -287,6 +349,24 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
     
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         hasCompletedFirstLoad = true
+
+        // Une page chargée ne prouve pas que Milō soit prêt : nginx la sert
+        // avant que le backend ne réponde (voir `probeMilo`). La montrer alors,
+        // c'est rester sur son logo. On la garde cachée, et le sondage la
+        // recharge dès que le backend répond — page et WebSocket d'un coup.
+        probeMilo { [weak self] probe in
+            guard let self = self else { return }
+            guard probe == .ready else {
+                self.isConnected = false
+                self.hideReconnectingOverlay()
+                self.showErrorView()
+                return
+            }
+            self.revealMilo()
+        }
+    }
+
+    private func revealMilo() {
         isConnected = true
 
         // Annuler le timer d'erreur initial (connexion réussie)
