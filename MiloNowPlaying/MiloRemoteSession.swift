@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import NowPlaying
 import Observation
 import OSLog
@@ -59,7 +60,32 @@ func miloBinaryStamp() -> String {
 final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
 
     let id: String
+
+    /// Ce que le système rend : ce que Milō a poussé, ou rien tant qu'il ne
+    /// répond pas sur le LAN — voir `miloReachable`.
     private(set) var attributes: MiloSessionAttributes
+
+    /// Ce que Milō a poussé en dernier, tel quel, pour le rendre dès son retour.
+    private var received: MiloSessionAttributes
+
+    /// Milō répond-il sur le LAN ?
+    ///
+    /// APNs le joint partout : hors de la maison, ses pushes continuaient de
+    /// tenir la carte à jour, piste, boutons et curseurs compris, alors que
+    /// tout ce qui remonte vers lui passe par le Wi-Fi de la maison. Faux,
+    /// l'extension ne rend plus rien (`MiloSessionAttributes.unreachable`,
+    /// demande de Leo le 03/10/2026) ; l'app, elle, ferme la session. Le verdict est partagé avec l'app
+    /// (`MiloAPIClient.lastKnownReachable`) pour qu'un processus neuf parte du
+    /// bon état plutôt que de réafficher la piste le temps d'une sonde.
+    private var miloReachable: Bool
+
+    @ObservationIgnored private var reachabilityProbe: Task<Void, Never>?
+    @ObservationIgnored private var reachableConfirmedAt = Date.distantPast
+    @ObservationIgnored private let wifiMonitor = NWPathMonitor(requiredInterfaceType: .wifi)
+
+    /// Une sonde réussie vaut pour les pushes qui suivent de près — une rafale
+    /// de volume en compte une dizaine, et chacun ajouterait une requête au LAN.
+    private static let reachableFreshness: TimeInterval = 10
 
     /// Incrémenté quand une écriture de volume est partie, et lu par `devices`
     /// pour cette seule raison : c'est ce qui fait relire les niveaux aussitôt.
@@ -80,7 +106,10 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
 
     init(attributes: MiloSessionAttributes) {
         self.id = attributes.id
-        self.attributes = attributes
+        let reachable = MiloAPIClient.lastKnownReachable
+        self.received = attributes
+        self.miloReachable = reachable
+        self.attributes = reachable ? attributes : .unreachable(id: attributes.id)
         miloLog.notice("SESSION CONSTRUITE \(attributes.id, privacy: .public) — pid \(getpid(), privacy: .public) instance \(ObjectIdentifier(self).debugDescription, privacy: .public)")
         Self.trace("session construite \(attributes.id)")
 
@@ -91,6 +120,12 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         MiloAPIClient.trace = { Self.trace($0) }
 
         startObservingPushToken()
+        startWatchingWiFi()
+        checkReachability()
+    }
+
+    deinit {
+        wifiMonitor.cancel()
     }
 
     /// Le système remet ici les attributs poussés par Milō. Les stocker suffit :
@@ -100,7 +135,9 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// session n'a qu'un nombre limité d'occasions de le faire aboutir et
     /// celle-ci en est une.
     func update(_ attributes: MiloSessionAttributes) {
-        self.attributes = attributes
+        received = attributes
+        render()
+        checkReachability()
         // En `.notice` : le flux en direct ne transmet pas les `.info` de façon
         // fiable, et c'est le seul repère sûr de l'arrivée d'un push quand le
         // téléphone est verrouillé. Les niveaux, le processus et l'instance
@@ -115,10 +152,86 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         registerPushTokenIfNeeded(occasion: "update")
     }
 
+    // MARK: - Milō hors de portée
+
+    private func render() {
+        attributes = miloReachable ? received : .unreachable(id: received.id)
+    }
+
+    private func setReachable(_ reachable: Bool) {
+        if reachable { reachableConfirmedAt = Date() }
+        MiloAPIClient.lastKnownReachable = reachable
+        guard reachable != miloReachable else { return }
+        miloReachable = reachable
+        miloLog.notice("Milō \(reachable ? "joignable, carte rendue" : "injoignable, carte vidée", privacy: .public)")
+        Self.trace(reachable ? "Milō joignable" : "Milō injoignable")
+        render()
+    }
+
+    /// Sonde Milō sur le LAN, une sonde à la fois.
+    ///
+    /// Deux tirages avant de conclure à l'absence : une requête perdue à la
+    /// maison viderait sinon la carte jusqu'au push suivant.
+    private func checkReachability() {
+        guard reachabilityProbe == nil else { return }
+        if miloReachable, Date().timeIntervalSince(reachableConfirmedAt) < Self.reachableFreshness { return }
+
+        let generation = networkGeneration
+        reachabilityProbe = Task { @MainActor [weak self] in
+            var reachable = await MiloAPIClient.probeReachable()
+            if !reachable, !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                reachable = await MiloAPIClient.probeReachable()
+            }
+            // Le Wi-Fi a changé pendant la sonde : son verdict décrit l'ancien
+            // réseau, et `startWatchingWiFi` a déjà tranché ou relancé.
+            guard let self, !Task.isCancelled, generation == self.networkGeneration else { return }
+            self.reachabilityProbe = nil
+            self.setReachable(reachable)
+        }
+    }
+
+    /// Change à chaque changement de Wi-Fi, pour écarter le verdict d'une sonde
+    /// partie avant.
+    @ObservationIgnored private var networkGeneration = 0
+
+    /// Annule la sonde en vol : elle a été lancée sur l'ancien réseau.
+    private func networkChanged() {
+        networkGeneration += 1
+        reachabilityProbe?.cancel()
+        reachabilityProbe = nil
+    }
+
+    /// Quitter le Wi-Fi, c'est quitter le LAN : la carte se vide sans
+    /// attendre le délai d'une sonde. En retrouver un ne prouve rien — ce peut
+    /// être celui d'un autre — d'où une sonde.
+    ///
+    /// Ne vaut que tant que le processus vit ; au-delà, c'est le push suivant
+    /// de Milō qui fait sonder.
+    private func startWatchingWiFi() {
+        wifiMonitor.pathUpdateHandler = { [weak self] path in
+            let onWiFi = path.status == .satisfied
+            Task { @MainActor in
+                guard let self else { return }
+                self.networkChanged()
+                if onWiFi {
+                    self.reachableConfirmedAt = .distantPast
+                    self.checkReachability()
+                } else {
+                    self.setReachable(false)
+                }
+            }
+        }
+        wifiMonitor.start(queue: DispatchQueue(label: "milo.wifi-path"))
+    }
+
     // MARK: - Ce qui joue
 
     var playbackSnapshot: MediaPlaybackSnapshot? {
-        MediaPlaybackSnapshot(
+        // Hors de portée, rien : ni piste (`unreachable` n'en porte pas), ni
+        // état de lecture, pour que le système retire la carte.
+        guard miloReachable else { return nil }
+        return MediaPlaybackSnapshot(
             state: attributes.isPlaying ? .playing() : .paused,
             elapsedTime: attributes.elapsedTime,
             timestamp: attributes.capturedAt

@@ -214,6 +214,10 @@ enum MiloNowPlayingBridge {
         // `stopPump()` immédiat annulerait celle-ci avant qu'elle n'exécute sa
         // première ligne, et l'ancienne boucle tournerait alors pour toujours.
         previous?.cancel()
+        // Les échecs d'avant l'arrière-plan ne disent rien du réseau d'après :
+        // les compter ferait fermer la carte au premier raté du retour, pendant
+        // que le Wi-Fi se réassocie.
+        unreachablePasses = 0
 
         pump = Task {
             await previous?.value
@@ -251,9 +255,13 @@ enum MiloNowPlayingBridge {
         // pas une fin de lecture, et effacer la carte à chaque paquet perdu la
         // ferait clignoter.
         guard let audioData = try? await MiloAPIClient.get(path: "/api/audio/state") else {
+            unreachablePasses += 1
             note("pas d'état exploitable depuis Milō")
+            await endIfUnreachable()
             return
         }
+        unreachablePasses = 0
+        MiloAPIClient.lastKnownReachable = true
 
         // Un état que cette version ne sait pas lire — une valeur inconnue de
         // `service` ou de `phase`, un champ manquant — ne change rien non plus :
@@ -352,6 +360,42 @@ enum MiloNowPlayingBridge {
             lastSignature = ""
             note("update refusé, session lâchée : \(error)")
         }
+    }
+
+    /// Passes consécutives sans réponse de Milō.
+    private static var unreachablePasses = 0
+
+    /// Deux passes, soit cinq à dix secondes : une requête perdue n'est pas
+    /// une sortie de la maison, et fermer la carte pour si peu la perdrait.
+    private static let unreachableAfterPasses = 2
+
+    /// Ferme la carte quand Milō ne répond plus — hors de la maison,
+    /// typiquement.
+    ///
+    /// La seule exception à « Milō décide de la fin » : hors du LAN, il ne
+    /// peut pas savoir que le téléphone est parti, et ses pushes continuent
+    /// d'arriver par APNs. L'extension ne peut pas fermer elle-même —
+    /// `RemoteMediaSession.end()` y est indisponible — et se contente de ne
+    /// plus rien rendre (`MiloRemoteSession.miloReachable`). L'app, si.
+    ///
+    /// Au retour, la réconciliation dit à Milō que la session n'existe plus,
+    /// et `openSession` en rouvre une si quelque chose joue.
+    private static func endIfUnreachable() async {
+        guard unreachablePasses >= unreachableAfterPasses else { return }
+        MiloAPIClient.lastKnownReachable = false
+
+        guard let session else { return }
+        do {
+            try await session.end()
+            note("Milō injoignable, carte fermée (\(session.id))")
+        } catch {
+            note("Milō injoignable, fermeture refusée : \(error)")
+        }
+        // Lâchée dans les deux cas : un `update` sur une session close
+        // échouerait de toute façon, et la réconciliation reprendra ce que le
+        // système tient encore.
+        self.session = nil
+        lastSignature = ""
     }
 
     /// Le système tient-il **une** session, même lâchée par l'app ?

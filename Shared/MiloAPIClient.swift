@@ -152,6 +152,34 @@ struct MiloAPIClient {
         return "http://milo.local"
     }
 
+    // MARK: - Joignabilité
+
+    /// Le dernier verdict sur Milō, partagé entre l'app et l'extension Now
+    /// Playing. L'extension change de processus à chaque réveil ou presque :
+    /// sans ce verdict, chaque processus neuf partirait de « joignable » et
+    /// réafficherait la piste le temps d'une sonde.
+    private static let lanReachableKey = "milo_lan_reachable"
+
+    static var lastKnownReachable: Bool {
+        get { UserDefaults(suiteName: appGroupID)?.object(forKey: lanReachableKey) as? Bool ?? true }
+        // Écrit au changement seulement : l'app le confirme à chaque passe de
+        // deux secondes, et chaque écriture traverse les processus.
+        set {
+            guard newValue != lastKnownReachable else { return }
+            UserDefaults(suiteName: appGroupID)?.set(newValue, forKey: lanReachableKey)
+        }
+    }
+
+    /// Milō répond-il sur le LAN ? N'importe quelle réponse HTTP compte : un
+    /// backend qui redémarre derrière nginx reste à la maison.
+    static func probeReachable(timeout: TimeInterval = 2) async -> Bool {
+        guard let url = URL(string: baseURL() + "/api/audio/state") else { return false }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        return (try? await lanData(for: request)) != nil
+    }
+
     // MARK: - Résolution de l'adresse
 
     /// L'adresse de Milō ne bouge qu'au renouvellement du bail DHCP : inutile de

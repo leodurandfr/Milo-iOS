@@ -89,6 +89,27 @@ struct MiloSessionAttributes: RemoteMediaSessionAttributes {
         )
     }
 
+    /// Ce que rend l'extension quand Milō ne répond plus sur le LAN : rien.
+    ///
+    /// Hors de la maison, Milō continue de pousser par APNs, qui le joint
+    /// partout : la carte gardait alors la piste en cours, avec des boutons et
+    /// un curseur qui ne pouvaient plus rien atteindre — tout ce qui remonte
+    /// vers Milō passe par le LAN. Une carte de Milō à l'arrêt a été essayée
+    /// d'abord et refusée le 03/10/2026 : elle doit disparaître (demande de
+    /// Leo). Ni piste, ni commande, ni enceinte ; `MiloRemoteSession` retire
+    /// aussi l'état de lecture.
+    static func unreachable(id: String) -> MiloSessionAttributes {
+        MiloSessionAttributes(
+            id: id,
+            isPlaying: false,
+            elapsedTime: 0,
+            timestamp: iso8601.string(from: .now),
+            currentTrack: nil,
+            devices: [],
+            controls: []
+        )
+    }
+
     /// `timestamp` est porté en `String` plutôt qu'en `Date`, délibérément.
     ///
     /// C'est le système qui décode ce type, et la stratégie de date de son
