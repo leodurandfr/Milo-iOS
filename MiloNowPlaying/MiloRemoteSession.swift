@@ -644,126 +644,87 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
 
     // MARK: - Enceintes
 
-    /// Un `MediaDevice` par client snapcast : l'utilisateur obtient un curseur
-    /// par pièce dans le Centre de contrôle.
+    /// Un seul `MediaDevice` : le système Milō, au niveau de son volume global
+    /// (décision du 12/10/2026).
+    ///
+    /// Avec un appareil par client, iOS dessinait la barre de l'écran
+    /// verrouillé et du Centre de contrôle à partir du plus fort d'entre eux —
+    /// jamais la moyenne, et l'API n'a aucun volume de session — et traduisait
+    /// chaque appui en niveaux par client selon des proportions qu'il garde
+    /// cachées. Les curseurs par pièce du Centre de contrôle disparaissent,
+    /// sciemment.
     ///
     /// Le niveau arrive normalisé 0…1 de Milō, et repart tel quel : Milō accepte
-    /// désormais `volume` sur cette même échelle. L'extension ne convertit plus
-    /// rien en décibels, et ne lit donc plus `volume_limits` — la copie qu'elle
-    /// en gardait était périmée, et c'est elle qui faisait monter le son de
-    /// trois fois trop peu. C'est toujours une écriture **absolue** : passer par
-    /// `/api/volume/adjust` serait une lecture-modification-écriture en course
-    /// contre l'encodeur rotatif de l'appareil.
+    /// `volume` sur cette même échelle, et l'extension ne convertit rien en
+    /// décibels. Ce qu'un rappel veut dire — un cran ou un glissement — se
+    /// décide dans `SystemVolumeModel`.
     var devices: [MediaDevice] {
         miloLog.notice("devices lu : \(self.attributes.devices.count, privacy: .public) enceinte(s)")
         _ = volumeEcho
 
-        // Dédupliqué avant tout le reste. `attributes.devices` est un simple
-        // tableau décodé d'un payload APNs : rien ne garantit que Milō n'y
-        // mette pas deux fois le même snapclient, et deux entrées de même
-        // identifiant donneraient deux `MediaDevice` de même id — donc deux
-        // curseurs pour une seule enceinte, et deux fermetures qui s'écrivent
-        // dessus — en plus de faire trapper le `Dictionary` ci-dessous.
+        // Dédupliqué : `attributes.devices` est un simple tableau décodé d'un
+        // payload APNs, et un snapclient compté deux fois fausserait la moyenne.
         var identifiers = Set<String>()
         let clients = attributes.devices.reversed()
             .filter { identifiers.insert($0.id).inserted }
-            .reversed()
+        guard !clients.isEmpty else { return [] }
 
-        // iOS ne voit que le système, pas ses clients (décision du 12/10/2026).
-        // Avec plusieurs appareils, iOS dessine la barre de l'écran verrouillé
-        // et du Centre de contrôle à partir du plus fort d'entre eux — jamais la
-        // moyenne, et l'API n'a aucun volume de session — et traduit chaque
-        // appui en niveaux par client selon des proportions qu'il garde
-        // cachées. Un seul appareil, dont le niveau est le global de Milō : la
-        // moyenne de ces mêmes clients (`service.py::_devices` les filtre sur
-        // l'ensemble que `global_volume` moyenne). Les curseurs par pièce du
-        // Centre de contrôle disparaissent, sciemment.
-        let unique = clients.isEmpty ? [] : [MiloSessionAttributes.Device(
+        // La moyenne de ces clients est `global_volume` : `service.py::_devices`
+        // les filtre sur l'ensemble que Milō moyenne.
+        let system = MiloSessionAttributes.Device(
             id: MiloAPIClient.systemDeviceID,
             name: "Milō",
             type: "speaker",
-            volume: clients.map(\.volume).reduce(0, +) / Float(clients.count))]
+            volume: clients.map(\.volume).reduce(0, +) / Float(clients.count))
+        // `base` et non `level` pour relire un appui : l'écart de confirmation
+        // s'affiche, il ne se calcule pas — voir `MiloAPIClient.displayedLevel`.
+        let (level, base) = Self.displayedVolume(system)
 
-        let shown = unique.map { device in
-            let (level, base) = Self.displayedVolume(device)
-            return (device: device, level: level, base: base)
-        }
-
-        // Ce que le système a sous les yeux, figé ici et passé en entier à
-        // chaque rappel. Il en faut l'ensemble, pas seulement un compte : le
-        // curseur maître ne pose pas une valeur, il **multiplie** les niveaux
-        // qu'on lui rend par un facteur commun — mesuré le 19/09/2026, trois
-        // enceintes, même rapport à sept chiffres — et ses rafales ne portent
-        // pas toujours les mêmes enceintes. Reconstituer la moyenne qu'il vise
-        // demande donc de savoir où sont celles qu'une rafale n'a pas citées.
-        // `uniquingKeysWith` et non `uniqueKeysWithValues`, qui fait un trap
-        // sur une clé répétée : la déduplication ci-dessus la rend déjà
-        // impossible, et c'est précisément pour ça qu'on ne veut pas d'un trap
-        // ici — il n'y aurait plus rien pour l'attraper si elle cessait de
-        // l'être. Même règle que la déduplication : la dernière l'emporte.
-        // `base` et non `level` : l'écart de confirmation s'affiche, il ne se
-        // calcule pas — voir `MiloAPIClient.displayedLevel`.
-        let snapshot = Dictionary(shown.map { ($0.device.id, $0.base) },
-                                  uniquingKeysWith: { _, last in last })
-
-        // Tracée quand elle change : sans elle au journal, le facteur que le
-        // système applique ensuite n'est pas interprétable.
-        Self.traceBase(shown
-            .map { "\($0.device.id)=\(((($0.level * 10000).rounded()) / 10000))" }
-            .joined(separator: " "))
+        // Tracée quand elle change : sans elle au journal, ce qu'iOS demande
+        // ensuite n'est pas interprétable.
+        Self.traceBase("\(system.id)=\(((level * 10000).rounded()) / 10000)")
 
         // Ce que la barre reçoit, à chaque lecture : c'est le repère de
         // « appui → la barre a le nouveau niveau ».
-        miloLog.notice("devices rendus — \(Self.levelsLine(shown.map { ($0.device.id, $0.level) }), privacy: .public)")
+        miloLog.notice("devices rendus — \(Self.levelsLine([(system.id, level)]), privacy: .public)")
 
-        // Ce qu'iOS lit ici, il le tient pour vu : c'est ce qui fait monter son
-        // plafond caché, et la rafale suivante se relit à partir de là. Voir
-        // `GroupVolumeMirror`.
         // Tel qu'iOS le reçoit, écart de confirmation compris : c'est ce que la
-        // carte affiche, et un appui part de là.
-        let during = GroupVolumeMirror.commandInFlight
-        if let system = shown.first {
-            let session = id
-            SystemVolumeModel.update {
-                $0.observe(Double(system.level), session: session, duringCommand: during,
-                           now: Date().timeIntervalSince1970)
-            }
+        // carte affiche, et ce qu'iOS adopte hors de ses commandes.
+        let during = VolumeCommand.commandInFlight
+        let session = id
+        SystemVolumeModel.update {
+            $0.observe(Double(level), session: session, duringCommand: during,
+                       now: Date().timeIntervalSince1970)
         }
 
-        return shown.map { device, level, _ in
-            MediaDevice(
-                id: device.id,
-                name: device.name,
-                type: Self.deviceType(device.type),
-                capabilities: [
-                    .absoluteVolume(level) { [weak self] newLevel in
-                        // Ce que `devices` rend d'ici au retour, iOS l'affiche
-                        // sans l'adopter : le miroir doit le savoir.
-                        GroupVolumeMirror.beginCommand()
-                        defer { GroupVolumeMirror.endCommand() }
-                        // Tracé AVANT le réseau : « rien ne se passe » ne
-                        // distingue pas une fermeture jamais appelée d'une
-                        // requête qui échoue, et ce sont deux causes opposées.
-                        miloLog.notice("RAPPEL VOLUME \(device.id, privacy: .public) -> \(newLevel, privacy: .public)")
-                        Self.trace("onChange \(device.id) -> \(newLevel)")
-                        let sent = await MiloAPIClient.applyVolume(mac: device.id,
-                                                                   to: newLevel,
-                                                                   snapshot: snapshot)
-                        // Seul le rappel dont l'envoi est allé au bout fait
-                        // relire : un rappel absorbé par la rafale suivante, ou
-                        // doublé par elle pendant l'aller-retour, rendrait en
-                        // plein geste des niveaux déjà dépassés, donc une base
-                        // périmée pour le facteur suivant.
-                        guard sent, let self else { return }
-                        await MainActor.run { self.volumeEcho &+= 1 }
-                    }
-                ]
-            )
-        }
+        return [MediaDevice(
+            id: system.id,
+            name: system.name,
+            type: .speaker,
+            capabilities: [
+                .absoluteVolume(level) { [weak self] newLevel in
+                    // Ce que `devices` rend d'ici au retour, iOS l'affiche sans
+                    // l'adopter : le modèle doit le savoir.
+                    VolumeCommand.beginCommand()
+                    defer { VolumeCommand.endCommand() }
+                    // Tracé AVANT le réseau : « rien ne se passe » ne distingue
+                    // pas une fermeture jamais appelée d'une requête qui
+                    // échoue, et ce sont deux causes opposées.
+                    miloLog.notice("RAPPEL VOLUME \(system.id, privacy: .public) -> \(newLevel, privacy: .public)")
+                    Self.trace("onChange \(system.id) -> \(newLevel)")
+                    let sent = await MiloAPIClient.applyVolume(to: newLevel, shown: base)
+                    // Seul le rappel dont l'envoi est allé au bout fait relire :
+                    // un rappel absorbé par le suivant rendrait en plein geste
+                    // un niveau déjà dépassé.
+                    guard sent, let self else { return }
+                    await MainActor.run { self.volumeEcho &+= 1 }
+                }
+            ]
+        )]
     }
 
-    /// Le niveau à montrer pour cette enceinte : ce que le doigt vient de
-    /// demander tant que c'est assez frais, sinon ce que Milō rapporte.
+    /// Le niveau à montrer pour le système : ce qu'on vient de demander tant
+    /// que c'est assez frais, sinon ce que Milō rapporte.
     ///
     /// Le même raccommodage existe déjà dans l'app — `buildDevices` — mais il
     /// ne couvre que le chemin de l'app. Des attributs arrivés par APNs sont
@@ -782,8 +743,8 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// -78…-8, une valeur optimiste reconvertie sur -80…-21 — ce choix entre
     /// les deux déplaçait le curseur à lui seul, à chaque expiration de la
     /// fenêtre.
-    /// Le plancher n'est pas cosmétique : le curseur maître **multiplie** ce
-    /// qu'on lui rend, et zéro le rend inerte pour toujours. Voir
+    /// Le plancher n'est pas cosmétique : iOS pose `référence × G / plafond`,
+    /// et une référence nulle le rend inerte pour toujours. Voir
     /// `MiloAPIClient.renderedLevel`.
     ///
     /// Et la valeur optimiste n'est pas rendue bit à bit : le système ignore
@@ -875,17 +836,6 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         traceLock.unlock()
         guard changed else { return }
         trace("base \(base)")
-    }
-
-    private static func deviceType(_ raw: String) -> MediaDevice.DeviceType {
-        switch raw {
-        case "tv": return .tv
-        case "phone": return .phone
-        case "tablet": return .tablet
-        case "desktop": return .desktop
-        case "laptop": return .laptop
-        default: return .speaker
-        }
     }
 
     // MARK: - Token de session

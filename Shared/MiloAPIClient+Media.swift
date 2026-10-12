@@ -260,128 +260,31 @@ extension MiloAPIClient {
         UserDefaults(suiteName: appGroupID)?.set(message, forKey: "milo_command_trace")
     }
 
-    /// Applique un niveau de curseur à une enceinte.
-    ///
-    /// Le curseur donne 0…1, Milō stocke des dB : on refait le chemin que Milō a
-    /// fait dans l'autre sens, avec les mêmes bornes. Écriture **absolue** — un
-    /// delta serait une lecture-modification-écriture en course contre l'encodeur
-    /// rotatif de l'appareil et son propre écran, ce que ces routes existent
-    /// précisément pour éviter.
-    ///
-    /// L'envoi est différé, pas immédiat. Pendant un glissement iOS tire des
-    /// rafales — mesuré : jusqu'à trois enceintes par rafale, plusieurs rafales
-    /// par seconde, et **pas toujours les mêmes enceintes**. Envoyer chaque
-    /// événement noyait Milō sous des écritures concurrentes dont la dernière
-    /// oubliait une enceinte, qui restait alors au niveau d'avant et cassait
-    /// l'équilibre entre les pièces. Ne garder que la dernière valeur par
-    /// enceinte suffit, et c'est la seule qui décrive l'intention du geste.
-    ///
-    /// Différé, mais **attendu** : voir `VolumeWriter.write`. Rendre la main
-    /// avant que l'écriture soit partie laissait le système terminer l'extension
-    /// entre-temps, et c'est justement la dernière valeur du geste qui
-    /// disparaissait.
     /// Journal de l'appelant, quand il en a un. L'extension y branche le sien.
     nonisolated(unsafe) static var trace: (@Sendable (String) -> Void)?
 
-    /// Applique à une enceinte le niveau que le système vient de demander.
+    /// Remet à Milō ce que le système vient de demander pour le système Milō.
     ///
-    /// Le niveau reste tel quel, entre 0 et 1. C'est l'échelle du curseur, et
-    /// c'est désormais celle que Milō accepte sur `volume` : plus aucune
-    /// conversion en décibels sur ce chemin.
+    /// Le niveau reste tel quel, entre 0 et 1. C'est l'échelle de la barre, et
+    /// c'est celle que Milō accepte sur `volume` : aucune conversion en
+    /// décibels sur ce chemin.
     ///
-    /// Elle y était, et c'était la panne. Convertir demandait les bornes de
+    /// Elle y a été, et c'était la panne. Convertir demandait les bornes de
     /// l'opérateur, donc une copie locale de `volume_limits` — et l'extension
     /// ne rafraîchit jamais la sienne. Elle a converti des mois durant sur
-    /// -80…-21 pendant que l'appareil tournait sur -78…-8 : un curseur poussé
-    /// en haut demandait 13 dB de moins que le haut, un geste de 43 % à 60 %
-    /// montait de 3 dB au lieu de 12, il fallait tirer jusqu'à 54 % pour ne
-    /// rien changer du tout, et le curseur redescendait tout seul à
-    /// l'expiration de la fenêtre optimiste. Milō normalise déjà dans l'autre
-    /// sens pour les mêmes raisons — voir `core/push/payloads.py`.
+    /// -80…-21 pendant que l'appareil tournait sur -78…-8. Milō normalise
+    /// déjà dans l'autre sens pour les mêmes raisons — voir
+    /// `core/push/payloads.py`.
     ///
-    /// `snapshot` est ce que nous avons rendu au système pour **toutes** les
-    /// enceintes, pas seulement celle-ci : il faut les autres pour reconstituer
-    /// la moyenne qu'un geste global vise, y compris quand la rafale ne les a
-    /// pas toutes touchées. Sans l'écart de confirmation : voir `baseLevel`.
+    /// `shown` est ce que nous avions rendu au système, sans l'écart de
+    /// confirmation (voir `baseLevel`) : c'est de là qu'un appui se relit.
     ///
-    /// Rend `true` si c'est cet appel qui a posé des niveaux optimistes et mené
-    /// son écriture à terme, `false` s'il a été absorbé par une rafale plus
-    /// récente ou n'avait rien à envoyer : seul le premier a quelque chose de
-    /// neuf à faire relire.
-    static func applyVolume(mac: String, to target: Float,
-                            snapshot: [String: Float]) async -> Bool {
-        var levels: [String: Double] = [:]
-        for (id, level) in snapshot {
-            levels[id.replacingOccurrences(of: ":", with: "")] =
-                min(max(Double(level), 0), 1)
-        }
-
-        return await VolumeGesture.shared.record(
-            mac: mac.replacingOccurrences(of: ":", with: ""),
-            target: min(max(Double(target), 0), 1),
-            snapshot: levels)
-    }
-
-    /// Le niveau global que vise un geste, ou `nil` s'il n'y a rien à viser.
-    ///
-    /// La moyenne des niveaux **après** le geste : les enceintes touchées à leur
-    /// cible, les autres là où elles sont. C'est exactement la définition du
-    /// global de Milō — la moyenne de ses clients, vérifiée contre
-    /// `/api/volume/state` — et `set_volume_db` décale ensuite tout le monde du
-    /// même écart sous `_volume_lock`. On garde donc le niveau voulu **et**
-    /// l'équilibre entre les pièces.
-    ///
-    /// Compléter avec les enceintes non touchées est ce qui rend une rafale
-    /// partielle juste au lieu de suspecte : une enceinte qu'elle ne mentionne
-    /// pas n'a pas bougé, et sa place dans la moyenne est son niveau actuel.
-    ///
-    /// Il existe une dilution théorique : pour `m` enceintes citées sur `n`, la
-    /// moyenne rend `1+(m/n)(k−1)` au lieu du facteur `k` demandé — à deux sur
-    /// trois, un ×1,57 deviendrait ×1,38.
-    ///
-    /// **Elle ne peut pas se produire ici, et c'est mesuré.** Journal de
-    /// l'extension du 22/09/2026, 945 rappels sur 46 minutes et cinq processus,
-    /// rejoués à travers la coalescence (180 ms à l'époque) : **315 envois sur 315
-    /// portaient les trois enceintes**. Aucune rafale partielle, aucune rafale
-    /// d'une seule enceinte. Et ce n'est pas de justesse — iOS émet ses trois
-    /// rappels en **2 ms au pire** (médiane 1 ms), la rafale suivante n'arrive
-    /// jamais avant **212 ms**. Le seuil, passé de 180 à 30 ms le 27/09/2026,
-    /// tombe dans ce vide : quinze fois la rafale la plus longue d'un côté, sept
-    /// fois moins que l'écart entre deux rafales de l'autre.
-    ///
-    /// Ne pas « corriger » ça sans avoir d'abord remesuré ce ratio. Mémoriser
-    /// les cibles du geste pour combler les absentes a été essayé deux fois et
-    /// retiré deux fois : ça déplace le biais sur les changements de direction
-    /// en cours de geste, et le garde-fou qui l'accompagnait détournait un vrai
-    /// geste de pièce fait moins de 600 ms après un geste global.
-    ///
-    /// **On envoie le niveau visé, pas un facteur.** Le système multiplie bien
-    /// les niveaux qu'on lui rend par un facteur commun, mais le relire comme un
-    /// gain `20·log₁₀(k)` produisait 33 % là où il en demandait 43, et les
-    /// extrémités devenaient inatteignables par construction.
-    static func globalTarget(touched: [String: Double],
-                             snapshot: [String: Double]) -> Double? {
-        guard !snapshot.isEmpty else { return nil }
-        let sum = snapshot.reduce(0.0) { $0 + (touched[$1.key] ?? $1.value) }
-        return min(max(sum / Double(snapshot.count), 0), 1)
-    }
-
-    /// Cette rafale est-elle un geste sur le curseur global ?
-    ///
-    /// Deux enceintes suffisent à trancher : dans le Centre de contrôle, un
-    /// doigt ne tient qu'un curseur de pièce à la fois. Une rafale qui en porte
-    /// plusieurs vient donc du curseur maître, qui les pousse tous.
-    ///
-    /// L'ancienne règle exigeait en plus que **toutes** les enceintes soient
-    /// touchées et que leurs rapports concordent à 1 %. Les deux échouaient en
-    /// silence — les rafales mesurées ne portent pas toujours les mêmes
-    /// enceintes, et un rapport n'a plus de sens sous une base quasi nulle — et
-    /// chaque échec repassait en écritures par enceinte, qui écartent les pièces
-    /// un peu plus à chaque geste. Le prix de la règle courte est qu'un geste
-    /// sur un seul curseur pendant qu'un autre bouge serait lu comme global ;
-    /// il faudrait deux doigts sur deux poignées à moins de 30 ms d'écart.
-    static func isGlobalGesture(touched: Int, deviceCount: Int) -> Bool {
-        deviceCount >= 2 && touched >= 2
+    /// Rend `true` si c'est cet appel qui a posé une valeur optimiste et mené
+    /// son écriture à terme, `false` s'il a été absorbé par un rappel plus
+    /// récent : seul le premier a quelque chose de neuf à faire relire.
+    static func applyVolume(to target: Float, shown: Float) async -> Bool {
+        await VolumeGesture.shared.record(posed: min(max(Double(target), 0), 1),
+                                          shown: min(max(Double(shown), 0), 1))
     }
 
     /// L'appareil unique qui représente tout le système Milō sur la carte Now
@@ -390,24 +293,6 @@ extension MiloAPIClient {
     /// jamais par client. Pas de deux-points : c'est aussi sa clé « MAC ».
     static let systemDeviceID = "milo-system"
 
-    /// L'écriture par enceinte, une fois le geste retombé.
-    ///
-    /// Sur l'échelle du curseur, un niveau ne peut plus déclencher le 400 que
-    /// cette route renvoie hors bornes : entre 0 et 1, il tombe dans les bornes
-    /// par construction.
-    fileprivate static func writeClientVolume(mac plain: String, level: Double) async -> Double? {
-        await writeVolume(path: "/api/volume/client/mac/\(plain)",
-                          body: ["volume": level],
-                          label: "volume \(plain)")
-    }
-
-    /// Le volume global, en une requête.
-    ///
-    /// Milō décale tous les clients du même écart sous `_volume_lock`, ce qui est
-    /// le seul endroit où ça peut être atomique. Trois écritures absolues
-    /// concurrentes aboutissaient aussi — vérifié — mais chacune posait un
-    /// niveau calculé de son côté, et l'équilibre entre les pièces s'écartait à
-    /// chaque geste.
     /// Ce qu'a donné un appui envoyé comme « un cran ».
     enum StepOutcome: Equatable {
         /// Milō a appliqué son pas ; le niveau global qui en résulte (0…1).
@@ -464,6 +349,13 @@ extension MiloAPIClient {
         return .applied(min(max(level, 0), 1))
     }
 
+    /// Le volume global, en une requête.
+    ///
+    /// Milō décale tous les clients du même écart sous `_volume_lock`, ce qui est
+    /// le seul endroit où ça peut être atomique. Trois écritures absolues
+    /// concurrentes aboutissaient aussi — vérifié — mais chacune posait un
+    /// niveau calculé de son côté, et l'équilibre entre les pièces s'écartait à
+    /// chaque geste.
     fileprivate static func writeGlobalVolume(level: Double) async -> Double? {
         await writeVolume(path: "/api/volume/global",
                           body: ["volume": level, "show_bar": true],
@@ -574,11 +466,10 @@ extension MiloAPIClient {
     /// dernier demi-millième. Une première version basculait à 0,5 et
     /// intervertissait deux enceintes de part et d'autre.
     ///
-    /// Cet écart est **affiché**, jamais **calculé** : l'instantané qui sert à
-    /// reconstituer un geste global part de `baseLevel`. Parti du niveau
-    /// affiché, `noteShift` l'aurait rangé dans la valeur optimiste, et le rendu
-    /// suivant l'aurait ajouté une seconde fois — un écart qui grossit à chaque
-    /// rafale pour deux enceintes de part et d'autre de la butée.
+    /// Cet écart est **affiché**, jamais **calculé** : un appui se relit à
+    /// partir de `baseLevel`. Parti du niveau affiché, l'écart finirait dans la
+    /// valeur optimiste, et le rendu suivant l'ajouterait une seconde fois — un
+    /// écart qui grossit à chaque rappel.
     ///
     /// Ce que la panne coûtait en plus de l'affichage : le curseur maître
     /// multiplie les niveaux par (position ÷ position affichée). Une carte restée
@@ -595,7 +486,7 @@ extension MiloAPIClient {
     /// fenêtre ferait bouger la valeur de 0,0005 **hors** d'une commande d'iOS,
     /// et iOS pourrait l'adopter comme nouvelle base — ou non, ce n'est pas
     /// mesuré. Un rendu qui ne bouge pas ne pose pas la question. Voir
-    /// `GroupVolumeMirror`.
+    /// `SystemVolumeModel`.
     static func displayedLevel(optimistic: Double?, reported: Double,
                                confirmed: Double? = nil) -> Double {
         guard let level = requestedLevel(optimistic: optimistic, reported: reported,
@@ -686,401 +577,10 @@ extension MiloAPIClient {
     }
 }
 
-/// Le volume de groupe qu'iOS tient caché sous le curseur principal de la carte,
-/// reconstitué de ce côté pour relire ses demandes.
-///
-/// **Ce qu'iOS fait, relevé dans `mediaremoted`** (26 et 27/09/2026) : un
-/// engagement G sur le curseur principal pose chaque enceinte à
-/// `référence × G / plafond`. Le plafond est le max du dernier G engagé et des
-/// niveaux adoptés depuis : il ne redescend que par un geste d'iOS. Baisser le
-/// son ailleurs (bouton rotatif, dock, Milo-Mac) fait donc tomber le rapport
-/// référence/plafond sous 1 pour de bon. Le 26/09 à 20:03, un plafond resté à
-/// 0,45 a fait **baisser** le son sur un « + » (0,1214 → 0,0496).
-///
-/// **Ce qu'iOS adopte, et ce qu'il n'adopte pas** (27/09, 01:21:36 → 01:21:44) :
-/// - un niveau rendu **hors** de ses commandes de volume (un push de Milō, un
-///   changement fait ailleurs) devient la référence de l'enceinte, et relève le
-///   plafond s'il le dépasse ;
-/// - un niveau rendu **pendant** une commande — entre l'appel du rappel
-///   `onChange` et son retour — est affiché par la carte ≈ 1,07 s après l'appui,
-///   mais n'est jamais adopté : la référence reste ce qu'iOS a posé lui-même.
-///   Supposer l'inverse a fait lire un « + » comme un « − » à 01:21:41.
-///
-/// Et la carte calcule un appui depuis ce qu'elle **affiche** : G = affiché ±
-/// 1/16, affiché compris l'écart de confirmation de +0,0005.
-///
-/// On relit donc chaque rafale pour retrouver le G engagé, puis ce que
-/// l'utilisateur voulait. Tant qu'iOS est sain, rien ne change. Si iOS recrée
-/// son point d'accès sans prévenir (vu le 26/09 sur une installation), la
-/// signature « affiché ± 1/16 » d'un appui départage l'état suivi d'un état
-/// sain ; un glissement retient l'hypothèse qui garde la continuité du doigt.
-///
-/// Pur et sans barrière `@available`, pour être testé avec les chiffres relevés.
-/// Rangé dans le conteneur partagé par `update` : l'extension change de
-/// processus sans arrêt, iOS garde son état.
-struct GroupVolumeMirror: Codable, Equatable {
+/// Les rappels `onChange` en cours dans ce processus : ce que `devices` rend
+/// pendant ce temps, la carte l'affiche mais iOS ne l'adopte pas.
+enum VolumeCommand {
 
-    /// Le plafond d'iOS : le G par lequel il divise.
-    var ceiling: Double = 0
-
-    /// Le niveau qu'iOS tient pour base, par enceinte (MAC sans deux-points).
-    var reference: [String: Double] = [:]
-
-    /// Ce que la carte affiche, par enceinte : c'est de là qu'un appui part.
-    var card: [String: Double] = [:]
-
-    /// Le dernier niveau principal voulu, et quand : l'ancre d'un glissement.
-    var lastIntended: Double?
-    var lastAt: TimeInterval = 0
-
-    /// Le dernier G engagé par iOS. Pendant ≈ 1,07 s après un appui, c'est lui
-    /// que la carte affiche — et d'où iOS calcule l'appui suivant — avant que
-    /// notre rendu ne le remplace (27/09, 02:07:44 → 02:07:46 : 0,2451 → 0,1826
-    /// → 0,1201 → 0,0576, chaque fois « dernier G − 1/16 »).
-    var lastSystemLevel: Double?
-
-    /// La dernière rafale relue était-elle un glissement ? Optionnel pour relire
-    /// l'état rangé par une version qui ne le connaissait pas.
-    var lastWasSlide: Bool?
-
-    /// De combien, au plus, le plafond suivi peut dépasser celui d'iOS, en
-    /// fraction. Nul quand un appui l'a recalé sans ambiguïté. Optionnel pour
-    /// la même raison que `lastWasSlide`.
-    ///
-    /// Quand des niveaux **inégaux** montent au-dessus du plafond, iOS n'adopte
-    /// pas forcément le plus haut : le 27/09 à 18:46:44, rendu 0,5274 / 0,5204 /
-    /// 0,5274, iOS a pris 0,5204 et le miroir 0,5274 (règle inconnue ; à sa
-    /// recréation, 18:42:24, iOS avait pris le plus haut). Et un appui du Centre
-    /// de contrôle relu sur ce plafond-là tombe à la fois sur l'exact et sur le
-    /// tronqué (0,3756 lu, 0,37 engagé à 18:47:00) : 1,5 % d'écart, que les
-    /// glissements gardent. À 1 % de marge fixe, le « + » de 18:49:10 n'était
-    /// plus reconnu. Une marge large en permanence, elle, prend un glissement
-    /// de ×1,05 pour un appui.
-    var slack: Double?
-
-    /// Comment la carte résume des niveaux inégaux. Inconnu tant qu'aucun appui
-    /// ne l'a montré : ce n'est pas encore mesuré. Pour des niveaux égaux, la
-    /// question ne se pose pas.
-    var cardRule: CardRule?
-
-    enum CardRule: String, Codable, CaseIterable {
-        case loudest, mean
-
-        func level(_ levels: some Collection<Double>) -> Double {
-            guard !levels.isEmpty else { return 0 }
-            switch self {
-            case .loudest: return levels.max() ?? 0
-            case .mean: return levels.reduce(0, +) / Double(levels.count)
-            }
-        }
-    }
-
-    /// Ce qu'une rafale voulait dire.
-    struct Reading: Equatable {
-        enum Kind: Equatable { case button(up: Bool), slider }
-        var kind: Kind
-        /// L'hypothèse retenue sur l'état d'iOS, pour la trace.
-        var hypothesis: String
-        /// Le G qu'iOS a engagé.
-        var systemLevel: Double
-        /// Le niveau principal voulu, sur l'échelle d'iOS. Pour un bouton, c'est
-        /// le repli quand Milō ne sait pas faire « un cran ».
-        var intended: Double
-        /// La cible corrigée de chaque enceinte de la rafale.
-        var targets: [String: Double]
-    }
-
-    /// Le pas d'un bouton physique sur une destination externe : 1/16, relevé
-    /// sur chaque appui des journaux (0,5349 → 0,5979 → 0,6609).
-    static let buttonStep = 1.0 / 16
-
-    /// Combien de temps le dernier G engagé peut encore être l'affiché : la
-    /// carte adopte notre rendu ≈ 1,07 s après l'appui ; marge comprise.
-    static let systemLevelShownFor: TimeInterval = 1.5
-
-    /// Au-delà, une rafale ouvre un nouveau geste : la rafale suivante d'un
-    /// glissement n'arrive jamais avant 212 ms, plus les 30 ms de regroupement.
-    static let gestureGap: TimeInterval = 0.8
-
-    /// Un glissement commence sous le doigt, donc près du niveau affiché. Une
-    /// lecture qui en partirait plus loin est une hypothèse fausse : on
-    /// n'invente pas un saut, on laisse faire iOS.
-    static let sliderJump = 0.25
-
-    /// Des niveaux plus proches que ça sont « égaux » : la règle de la carte n'y
-    /// change rien.
-    static let evenSpread = 0.005
-
-    /// Jusqu'où l'estimation d'un appui exact peut s'écarter d'« affiché ±
-    /// 1/16 », en plus de `slack`. Synchronisé avec iOS, le miroir tombe à 1e-6
-    /// près.
-    static let buttonTolerance = 0.01
-
-    /// Au-delà, une marge prendrait les glissements pour des appuis. 5 % couvrent
-    /// les écarts entre enceintes mesurés : 1,35 % à 0,52, 3,4 % à 0,21, 4 % à 0,05.
-    static let maxSlack = 0.05
-
-    /// En dessous, un G engagé est nul : iOS n'y perd pas ses rapports
-    /// (0,72207 avant et après le zéro de 18:49:42, le 27/09), le miroir non plus.
-    static let silentLevel = 0.0001
-
-    /// Ce qu'iOS vient de lire dans `devices`, tel qu'il l'a reçu (écart de
-    /// confirmation compris). `duringCommand` : lu pendant qu'un rappel
-    /// `onChange` était en cours — la carte l'affichera, iOS ne l'adoptera pas.
-    mutating func observe(_ displayed: [String: Double], duringCommand: Bool) {
-        reference = reference.filter { displayed[$0.key] != nil }
-        card = card.filter { displayed[$0.key] != nil }
-        let unseeded = ceiling <= 0 || reference.isEmpty
-        let previousCeiling = ceiling
-        var adopted: [Double] = []
-        for (id, level) in displayed {
-            let previous = card[id]
-            card[id] = level
-            // Un niveau qui n'a pas bougé n'est pas un changement : iOS n'a
-            // rien vu passer, et garde sa référence.
-            let changed = previous.map { abs($0 - level) > 0.000_001 } ?? true
-            guard unseeded || (changed && !duringCommand) else { continue }
-            reference[id] = level
-            ceiling = max(ceiling, level)
-            adopted.append(level)
-        }
-        // iOS repart de ce qu'il voit, comme nous.
-        if unseeded { slack = nil }
-        // Un niveau adopté remplace sur la carte le 0 qu'iOS y gardait.
-        if !unseeded, !adopted.isEmpty, let last = lastSystemLevel, last <= Self.silentLevel {
-            lastSystemLevel = nil
-        }
-        // Monté au-dessus du plafond : iOS en a pris un entre le plus bas des
-        // niveaux montés et le plus haut. Voir `slack`.
-        guard !unseeded, ceiling > previousCeiling, let lowest = adopted.min() else { return }
-        let spread = (ceiling - max(previousCeiling, lowest)) / ceiling
-        slack = min(lowest > previousCeiling ? spread : max(slack ?? 0, spread), Self.maxSlack)
-    }
-
-    /// Un curseur de pièce, dans le Centre de contrôle : iOS pose ce niveau-là
-    /// tel quel, la carte l'affiche aussitôt.
-    mutating func notePerDevice(_ burst: [String: Double]) {
-        for (id, level) in burst {
-            reference[id] = level
-            card[id] = level
-            ceiling = max(ceiling, level)
-        }
-    }
-
-    /// Relit une rafale du curseur principal. `burst` est ce qu'iOS demande par
-    /// enceinte, `shown` ce que nous lui avions rendu, sans l'écart de
-    /// confirmation (MAC sans deux-points). `nil` : aucune lecture sûre, on
-    /// laisse passer ce qu'iOS demande — le comportement d'avant, jamais pire.
-    mutating func interpret(burst: [String: Double], shown: [String: Double],
-                            now: TimeInterval) -> Reading? {
-        let touched = burst.filter { shown[$0.key] != nil }
-        guard !touched.isEmpty, let loudest = shown.values.max(), loudest > 0 else { return nil }
-        let even = loudest - (shown.values.min() ?? loudest) <= Self.evenSpread
-        let rules: [CardRule] = even ? [.loudest] : cardRule.map { [$0] } ?? CardRule.allCases
-        let display = card.merging(shown) { seen, _ in seen }
-
-        struct Hypothesis {
-            let name: String
-            let reference: [String: Double]
-            let level: Double
-        }
-        func hypothesis(_ name: String, ceiling: Double,
-                        reference: [String: Double]) -> Hypothesis? {
-            guard ceiling > 0 else { return nil }
-            let reference = reference.merging(display) { known, _ in known }
-            let levels = touched.compactMap { id, requested -> Double? in
-                guard let base = reference[id], base > Self.silentLevel else { return nil }
-                return requested * ceiling / base
-            }.sorted()
-            guard !levels.isEmpty else { return nil }
-            return Hypothesis(name: name, reference: reference,
-                              level: min(levels[levels.count / 2], 1))
-        }
-
-        let hypotheses = [
-            hypothesis("suivie", ceiling: ceiling, reference: reference),
-            // iOS a recréé son point d'accès : il repart de ce qu'il affiche.
-            hypothesis("saine", ceiling: display.values.max() ?? 0, reference: display),
-        ].compactMap { $0 }
-        guard !hypotheses.isEmpty else { return nil }
-
-        func clamp(_ level: Double) -> Double { min(max(level, 0), 1) }
-
-        // Un bouton : G vaut l'affiché ± 1/16. Exactement sur l'écran
-        // verrouillé, à quatre à six décimales près. **Tronqué au centième**
-        // dans le Centre de contrôle : 0,20 → 0,26 → 0,32 → 0,38 → 0,44 puis
-        // 0,37, 0,30… pour cinq « + » et cinq « − » (27/09, 02:02:36). La
-        // troncature se lit aussi sur l'affiché sans l'écart de confirmation,
-        // qui peut faire passer le centième.
-        //
-        // Pendant un glissement, la marge stricte : d'une rafale à l'autre, le
-        // doigt peut parcourir 1/16 en 212 ms, et `slack` le prendrait pour un
-        // bouton. Mais on teste quand même : un appui mal lu ne doit pas faire
-        // lire les appuis rapides suivants comme des glissements.
-        typealias Match = (hypothesis: Hypothesis, rule: CardRule, up: Bool, level: Double, error: Double)
-        var matches: [Match] = []
-        let sliding = lastWasSlide == true && now - lastAt < Self.gestureGap
-        let margin = sliding ? 0 : slack ?? 0
-        // À zéro, la carte garde le 0 d'iOS tant que rien d'autre n'est adopté :
-        // un « − » de plus au plancher ne nous rappelle même pas, et le « + »
-        // suivant part de 0 (27/09, 20:40:50 → 20:40:57 : engagé 0,0625).
-        let recentSystemLevel = lastSystemLevel.flatMap {
-            now - lastAt < Self.systemLevelShownFor || $0 <= Self.silentLevel ? $0 : nil
-        }
-        for candidate in hypotheses {
-            for rule in rules {
-                for shownOnCard in [rule.level(display.values), recentSystemLevel].compactMap({ $0 }) {
-                for up in [true, false] {
-                    let step = up ? Self.buttonStep : -Self.buttonStep
-                    let exact = clamp(shownOnCard + step)
-                    let truncated = [shownOnCard, shownOnCard - MiloAPIClient.acknowledgedOffset]
-                        .map { clamp((($0 + step) * 100).rounded(.down) / 100) }
-                    let signatures = [(exact, max(0.0015, (Self.buttonTolerance + margin) * exact))]
-                        + truncated.map { ($0, 0.0006 + margin * $0) }
-                    for (expected, tolerance) in signatures {
-                        let error = abs(candidate.level - expected)
-                        guard error <= tolerance else { continue }
-                        matches.append((candidate, rule, up, expected, error))
-                    }
-                }
-                }
-            }
-        }
-
-        let best = matches.min { $0.error < $1.error }
-        // Ce qu'un appui laisse d'incertitude : l'écart aux autres signatures
-        // qu'il pouvait aussi être.
-        let ambiguity = best.map { best in
-            matches.map { abs($0.level - best.level) / max(best.level, Self.silentLevel) }.max() ?? 0
-        }
-        let chosen: Hypothesis
-        let systemLevel: Double
-        let intended: Double
-        let kind: Reading.Kind
-        let rule: CardRule
-        if let best {
-            chosen = best.hypothesis
-            systemLevel = best.level
-            rule = best.rule
-            intended = clamp(rule.level(shown.values)
-                             + (best.up ? Self.buttonStep : -Self.buttonStep))
-            kind = .button(up: best.up)
-            if !even { cardRule = rule }
-        } else {
-            // Un glissement : sans règle connue pour des niveaux inégaux, on ne
-            // sait pas où était la poignée.
-            guard let known = even ? .loudest : cardRule else {
-                forget(burst: touched, now: now)
-                return nil
-            }
-            rule = known
-            let anchor = lastIntended.flatMap { now - lastAt < Self.gestureGap ? $0 : nil }
-                ?? rule.level(display.values)
-            // L'état suivi d'abord, tant qu'il reste près du doigt. Choisir
-            // l'hypothèse la plus proche donnait « saine » dès qu'iOS tenait un
-            // rapport un peu sous 1 : la rafale se lisait bien, mais le rapport du
-            // miroir retombait à 1, et plus aucun appui n'était reconnu (27/09,
-            // 18:49:10). « Saine » ne sert qu'à un point d'accès recréé, où l'état
-            // suivi part loin du doigt.
-            //
-            // Sauf un centième rond, pile : c'est ce que pose le Centre de
-            // contrôle, qui saute où le doigt touche le curseur (27/09, 20:40:33 :
-            // 0,4600 lu depuis 0,035, que « saine » ramenait à 0,023). Pas une
-            // lecture bornée à 1, qui tombe toujours pile.
-            func onAHundredth(_ level: Double) -> Bool {
-                level < 1 && abs(level * 100 - (level * 100).rounded()) < 0.003
-            }
-            guard let plausible = hypotheses.first(where: {
-                abs($0.level - anchor) <= Self.sliderJump
-                    || ($0.name == "suivie" && onAHundredth($0.level))
-            }) else {
-                forget(burst: touched, now: now)
-                return nil
-            }
-            chosen = plausible
-            systemLevel = plausible.level
-            intended = clamp(plausible.level)
-            kind = .slider
-        }
-
-        // Ce que nous montrions, porté au niveau voulu : l'équilibre entre les
-        // pièces est gardé, et c'est `globalTarget` qui en fera la moyenne.
-        let base = rule.level(shown.values)
-        var targets: [String: Double] = [:]
-        for id in touched.keys {
-            targets[id] = base > 0 ? clamp(shown[id]! * intended / base) : intended
-        }
-
-        // iOS vient d'engager `systemLevel` : c'est son nouveau plafond, ce qu'il
-        // a posé devient sa référence, et la carte l'affiche aussitôt.
-        //
-        // Sauf à zéro : iOS y garde ses rapports, et le « + » suivant pose le même
-        // rapport × G qu'avant. Un plafond nul faisait adopter au miroir le
-        // plancher rendu (0,0100) comme référence ET plafond, un rapport de 1
-        // contre 0,72207 chez iOS : les « + » de 18:52:11 → 18:52:15 partaient en
-        // glissements.
-        var posed = chosen.reference
-        for (id, level) in touched {
-            posed[id] = level
-            card[id] = level
-        }
-        if systemLevel > Self.silentLevel {
-            ceiling = systemLevel
-            reference = posed
-            if let ambiguity { slack = min(ambiguity, Self.maxSlack) }
-        }
-        lastIntended = intended
-        lastSystemLevel = systemLevel
-        lastAt = now
-        lastWasSlide = kind == .slider
-
-        return Reading(kind: kind, hypothesis: chosen.name, systemLevel: systemLevel,
-                       intended: intended, targets: targets)
-    }
-
-    /// Aucune lecture sûre : on repart d'un état sain, avec ce qu'iOS vient de
-    /// poser pour référence. Le prochain appui dira si c'était juste.
-    private mutating func forget(burst: [String: Double], now: TimeInterval) {
-        for (id, level) in burst {
-            card[id] = level
-        }
-        // Une rafale nulle ne dit rien des rapports d'iOS : on garde ceux qu'on a.
-        if (burst.values.max() ?? 0) > Self.silentLevel {
-            reference.merge(burst) { _, posed in posed }
-            ceiling = reference.values.max() ?? 0
-        }
-        lastIntended = nil
-        lastSystemLevel = nil
-        lastWasSlide = nil
-        lastAt = now
-    }
-}
-
-extension GroupVolumeMirror {
-
-    static let storeKey = "milo_group_volume_mirror_v2"
-    private static let storeLock = NSLock()
-
-    /// Lit, modifie et range l'état, sous verrou : `devices` (fil principal) et
-    /// l'envoi des rafales (un acteur) y touchent tous deux, et c'est une
-    /// lecture-modification-écriture.
-    @discardableResult
-    static func update<T>(_ body: (inout GroupVolumeMirror) -> T) -> T {
-        storeLock.lock()
-        defer { storeLock.unlock() }
-        let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID)
-        var mirror = defaults?.data(forKey: storeKey)
-            .flatMap { try? JSONDecoder().decode(GroupVolumeMirror.self, from: $0) }
-            ?? GroupVolumeMirror()
-        let result = body(&mirror)
-        if let data = try? JSONEncoder().encode(mirror) {
-            defaults?.set(data, forKey: storeKey)
-        }
-        return result
-    }
-
-    /// Combien de rappels `onChange` sont en cours dans ce processus. Ce que
-    /// `devices` rend pendant ce temps, iOS ne l'adopte pas.
     private static let commandLock = NSLock()
     nonisolated(unsafe) private static var commandsInFlight = 0
     nonisolated(unsafe) private static var lastCommandEnd: TimeInterval = 0
@@ -1106,19 +606,6 @@ extension GroupVolumeMirror {
         commandLock.lock(); defer { commandLock.unlock() }
         return commandsInFlight > 0
             || Date().timeIntervalSince1970 - lastCommandEnd < commandGrace
-    }
-}
-
-extension GroupVolumeMirror.Reading {
-    /// Une ligne de trace : ce qu'iOS a engagé, dans quel état, et ce qui part.
-    var summary: String {
-        func r(_ level: Double) -> String { String(format: "%.4f", level) }
-        let what: String
-        switch kind {
-        case .button(let up): what = up ? "bouton +" : "bouton −"
-        case .slider: what = "glissement"
-        }
-        return "iOS \(what) (\(hypothesis)) G=\(r(systemLevel)) → voulu \(r(intended))"
     }
 }
 
@@ -1325,42 +812,22 @@ extension SystemVolumeModel.Reading {
     }
 }
 
-/// Ne garde que la dernière intention du geste, et décide de sa nature.
+/// Ne garde que la dernière intention du geste, relit sa nature, et l'envoie.
 ///
-/// Une seule échéance pour toutes les enceintes, et non plus une par enceinte :
-/// c'est ce qui permet de voir une rafale **comme un tout**. Trois rappels
-/// portant le même rapport sont un geste sur le curseur global ; un seul rappel
-/// est un curseur individuel. Rendus séparément, ils étaient indiscernables.
+/// La carte n'a qu'un appareil, le système Milō : un rappel porte un seul
+/// niveau, celui qu'iOS demande pour lui.
 private actor VolumeGesture {
     static let shared = VolumeGesture()
 
-    /// La dernière cible demandée pour chaque enceinte, sur l'échelle du curseur.
-    private var pending: [String: Double] = [:]
+    /// La dernière demande d'iOS, et ce que nous lui montrions à ce moment-là.
+    private var pending: (posed: Double, shown: Double)?
 
     /// Numéro du dernier envoi parti.
     ///
     /// L'acteur est réentrant sur l'await réseau : sans ce numéro, un envoi lent
-    /// qui reprend repose les niveaux d'un instantané périmé par-dessus ceux
-    /// qu'un envoi plus récent vient d'écrire, et la base rendue au système
-    /// recule en plein geste — donc le facteur suivant se calcule sur un niveau
-    /// qui n'est plus le bon.
+    /// qui reprend repose une valeur optimiste par-dessus celle qu'un envoi plus
+    /// récent vient d'écrire, et l'affichage recule en plein geste.
     private var generation: UInt64 = 0
-
-    /// Ce que nous avons rendu au système pour **toutes** les enceintes, dans sa
-    /// version la plus récente. Il sert deux fois : à compléter la moyenne d'un
-    /// geste global avec les enceintes qu'une rafale n'a pas touchées, et à
-    /// répartir le résultat en niveaux optimistes.
-    ///
-    /// Remplacé, et sans purger `pending` au passage. Les cibles sont des
-    /// niveaux absolus, pas des écarts : un instantané plus récent ne les périme
-    /// pas. Il ne périme que les niveaux des enceintes restées immobiles,
-    /// qu'on veut justement les plus frais possible.
-    ///
-    /// Ça suffisait tant que rien ne relisait cette base **après** un aller-retour
-    /// réseau. Ce n'est plus vrai : la correction post-écriture, elle, s'exécute
-    /// de l'autre côté d'un await sur lequel l'acteur est réentrant, et c'est
-    /// `generation` qui l'empêche de reposer un instantané d'avant.
-    private var snapshot: [String: Double] = [:]
     private var flush: Task<Bool, Never>?
 
     /// Le dernier « cran » parti : le suivant l'attend. Milō applique chaque
@@ -1370,16 +837,11 @@ private actor VolumeGesture {
     /// n'en feraient qu'un.
     private var lastStep: Task<MiloAPIClient.StepOutcome, Never>?
 
-    /// Assez long pour réunir les rappels d'une rafale, et pas davantage.
-    ///
-    /// Une rafale, c'est un rappel par enceinte, émis en **2 ms au pire**
-    /// (médiane 1 ms) ; la suivante n'arrive pas avant **212 ms** pendant un
-    /// glissement (315 envois relus le 22/09/2026), et deux appuis sur un bouton
-    /// sont engagés à ~230 ms d'écart au plus serré (26/09). Elle valait 180 ms :
-    /// assez pour fondre deux appuis rapides en un seul envoi depuis qu'un appui
-    /// part en « un cran » — un cran perdu, et un engagement d'iOS que
-    /// `GroupVolumeMirror` n'aurait jamais vu. 30 ms gardent quinze fois la
-    /// rafale la plus longue (11 appuis sur 11 réunis, mesuré le 26/09).
+    /// Assez long pour réunir des rappels quasi simultanés, et pas davantage :
+    /// pendant un glissement la rafale suivante n'arrive pas avant **212 ms**
+    /// (315 envois relus le 22/09/2026), et deux appuis sur un bouton sont
+    /// engagés à ~230 ms d'écart au plus serré (26/09). À 180 ms, deux appuis
+    /// rapides fondus en un seul envoi perdaient un cran.
     private static let quietPeriod = Duration.milliseconds(30)
 
     /// Programme l'écriture, **et l'attend**.
@@ -1389,29 +851,16 @@ private actor VolumeGesture {
     /// après l'avoir lue — mesuré le 19/09/2026, six millisecondes entre la
     /// lecture et le `RBSTerminateRequest`. Une écriture posée dans une tâche
     /// détachée que personne n'attend meurt donc avec le processus, et c'est la
-    /// **dernière** valeur du geste qui se perdait ainsi : celle qui compte,
-    /// laissant une enceinte au niveau d'avant.
-    ///
-    /// Tant que l'appelant attend, le système tient son rappel pour en cours et
-    /// laisse le processus vivre.
+    /// **dernière** valeur du geste qui se perdait ainsi : celle qui compte.
     ///
     /// La coalescence est préservée : un événement plus récent annule le
     /// précédent, dont l'attente se dénoue aussitôt — `Task.sleep` jette à
     /// l'annulation, et la garde qui suit rend la main sans écrire.
     ///
-    /// Ce que cette annulation coûte, et qu'elle coûtait déjà : `send` a vidé
-    /// `pending` avant de partir, si bien qu'une enceinte citée par la rafale
-    /// abandonnée et pas par la suivante n'est jamais réécrite. Sur le chemin
-    /// global c'est sans effet — une seule requête porte tout le monde — et sur
-    /// le chemin par enceinte l'écart se referme au geste suivant. Le corriger
-    /// demanderait de ne retirer de `pending` que ce qui est réellement parti,
-    /// ce qui n'a pas paru valoir le risque tant que le geste maître aboutit.
-    ///
-    /// Rend ce que rend `send`, ou `false` quand une rafale plus récente a
+    /// Rend ce que rend `send`, ou `false` quand un rappel plus récent a
     /// annulé cette tâche avant qu'elle parte.
-    func record(mac: String, target: Double, snapshot: [String: Double]) async -> Bool {
-        pending[mac] = target
-        self.snapshot = snapshot
+    func record(posed: Double, shown: Double) async -> Bool {
+        pending = (posed, shown)
 
         flush?.cancel()
         let task = Task { [weak self] () -> Bool in
@@ -1423,107 +872,31 @@ private actor VolumeGesture {
         return await task.value
     }
 
-    /// Une rafale coalescée part d'ici, et d'ici seulement.
+    /// Un rappel coalescé part d'ici, et d'ici seulement : un bouton est un cran
+    /// de Milō, jamais un niveau ; seul un glissement en écrit un, borné. Voir
+    /// `SystemVolumeModel`.
     ///
-    /// Rend `true` quand cet envoi a posé des niveaux optimistes et qu'aucun
-    /// plus récent ne l'a remplacé en route — y compris sur un échec, où
-    /// l'affichage vient d'être rendu à Milō : dans les deux cas il y a du neuf
-    /// à relire. `false` quand il n'y avait rien à envoyer, ou qu'une rafale
-    /// plus récente a pris la main pendant l'aller-retour : faire relire alors
-    /// rendrait en plein geste des niveaux déjà dépassés.
+    /// Rend `true` quand cet envoi a posé une valeur optimiste et qu'aucun plus
+    /// récent ne l'a remplacé en route — y compris sur un échec, où l'affichage
+    /// vient d'être rendu à Milō : dans les deux cas il y a du neuf à relire.
     private func send() async -> Bool {
-        let entries = pending
-        let shown = snapshot
-        pending = [:]
-        guard !entries.isEmpty, !shown.isEmpty else { return false }
+        guard let (posed, shown) = pending else { return false }
+        pending = nil
 
         generation &+= 1
         let mine = generation
-
-        // Une enceinte que l'instantané ne connaît pas ne peut pas peser dans
-        // une moyenne indexée sur lui : elle ne compte pas pour décider de la
-        // nature du geste. C'est bien un compte à part et non un filtre sur
-        // `entries` : une rafale d'une seule enceinte connue sur deux rendues
-        // était lue comme globale, alors qu'un doigt ne tient qu'un curseur de
-        // pièce à la fois.
-        //
-        // Sa cible à elle est perdue si la rafale part quand même en global —
-        // mais une enceinte absente de ce qu'on a rendu n'a pas de place dans
-        // le décalage que Milō va appliquer, et elle reviendra avec le prochain
-        // instantané.
-        let seen = entries.filter { shown[$0.key] != nil }
-        let global = MiloAPIClient.isGlobalGesture(touched: seen.count, deviceCount: shown.count)
-
-        // Le système Milō, seul appareil de la carte : un bouton est un cran de
-        // Milō, jamais un niveau ; seul un glissement en écrit un, borné. Voir
-        // `SystemVolumeModel`.
         let system = MiloAPIClient.systemDeviceID
-        if let posed = seen[system], let level = shown[system] {
-            let reading = SystemVolumeModel.update {
-                $0.interpret(posed: posed, shown: level, now: Date().timeIntervalSince1970)
-            }
-            MiloAPIClient.trace?(reading.summary)
-            switch reading.kind {
-            case .button(let up):
-                let previous = lastStep
-                let step = Task { () -> MiloAPIClient.StepOutcome in
-                    _ = await previous?.value
-                    return await MiloAPIClient.stepVolume(up: up)
-                }
-                lastStep = step
-                let outcome = await step.value
-                guard !Task.isCancelled, generation == mine else { return false }
-                switch outcome {
-                case .applied(let applied):
-                    MiloAPIClient.noteOptimistic(mac: system, level: applied)
-                    MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") → \(Self.rounded(applied))")
-                case .appliedUnknown, .failed:
-                    MiloAPIClient.forgetOptimistic(macs: [system])
-                    MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") : \(outcome == .failed ? "échec" : "niveau à venir par le push")")
-                }
-            case .slider(let target):
-                MiloAPIClient.noteOptimistic(mac: system, level: target)
-                let applied = await MiloAPIClient.writeGlobalVolume(level: target)
-                guard !Task.isCancelled, generation == mine else { return false }
-                guard let applied else {
-                    MiloAPIClient.forgetOptimistic(macs: [system])
-                    MiloAPIClient.trace?("global échoué, affichage rendu à Milō")
-                    return true
-                }
-                if abs(applied - target) > 0.001 {
-                    MiloAPIClient.noteOptimistic(mac: system, level: applied)
-                    MiloAPIClient.trace?("global appliqué → \(Self.rounded(applied))")
-                }
-            }
-            return true
-        }
 
-        // Ce que le geste voulait dire, et non ce qu'iOS en a déduit : sous un
-        // plafond resté haut, iOS demande moins que l'appui — voire moins que
-        // le niveau d'avant sur un « + ». Une enceinte seule passe aussi par
-        // là, son curseur principal ayant le même plafond (0,909 mesuré le
-        // 26/09 avec un seul appareil). Un curseur de pièce, lui, pose sa
-        // valeur telle quelle. Voir `GroupVolumeMirror`.
-        var wanted = entries
-        var reading: GroupVolumeMirror.Reading?
-        if global || shown.count == 1 {
-            reading = GroupVolumeMirror.update {
-                $0.interpret(burst: seen, shown: shown, now: Date().timeIntervalSince1970)
-            }
-            if let reading {
-                wanted.merge(reading.targets) { _, corrected in corrected }
-                MiloAPIClient.trace?(reading.summary)
-            } else {
-                MiloAPIClient.trace?("iOS : rafale non relue, telle quelle")
-            }
-        } else {
-            GroupVolumeMirror.update { $0.notePerDevice(seen) }
+        let reading = SystemVolumeModel.update {
+            $0.interpret(posed: posed, shown: shown, now: Date().timeIntervalSince1970)
         }
+        MiloAPIClient.trace?(reading.summary)
 
-        // Un bouton physique fait le pas de Milō, comme les boutons du widget.
-        // Pas de repli sur le niveau absolu : un échec n'y gagnerait rien, et un
-        // envoi qui aurait abouti sans réponse deviendrait un second changement.
-        if case .button(let up)? = reading?.kind {
+        switch reading.kind {
+        case .button(let up):
+            // Pas de repli sur un niveau absolu : un échec n'y gagnerait rien,
+            // et un envoi qui aurait abouti sans réponse deviendrait un second
+            // changement.
             let previous = lastStep
             let step = Task { () -> MiloAPIClient.StepOutcome in
                 _ = await previous?.value
@@ -1533,89 +906,37 @@ private actor VolumeGesture {
             let outcome = await step.value
             guard !Task.isCancelled, generation == mine else { return false }
             switch outcome {
-            case .applied(let level):
-                let mean = shown.values.reduce(0, +) / Double(shown.count)
-                noteShift(shown: shown, to: level, from: mean)
-                MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") → \(Self.rounded(level))")
+            case .applied(let applied):
+                MiloAPIClient.noteOptimistic(mac: system, level: applied)
+                MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") → \(Self.rounded(applied))")
             case .appliedUnknown:
                 // L'affichage revient à ce que Milō rapporte : le push suit.
-                MiloAPIClient.forgetOptimistic(macs: Array(shown.keys))
+                MiloAPIClient.forgetOptimistic(macs: [system])
                 MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") → niveau à venir par le push")
             case .failed:
-                MiloAPIClient.forgetOptimistic(macs: Array(shown.keys))
+                MiloAPIClient.forgetOptimistic(macs: [system])
                 MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") : échec")
             }
-            return true
-        }
 
-        if global, let target = MiloAPIClient.globalTarget(touched: wanted, snapshot: shown) {
-            // Les niveaux optimistes décrivent ce que Milō va **appliquer** —
-            // le même écart pour tout le monde — et non les cibles brutes du
-            // système, qui écarteraient les pièces à l'affichage avant même que
-            // l'état réel les remette d'accord.
-            let mean = shown.values.reduce(0, +) / Double(shown.count)
-            noteShift(shown: shown, to: target, from: mean)
-            MiloAPIClient.trace?(
-                "geste global → \(Self.rounded(target)) (\(seen.count)/\(shown.count))")
-
+        case .slider(let target):
+            MiloAPIClient.noteOptimistic(mac: system, level: target)
             let applied = await MiloAPIClient.writeGlobalVolume(level: target)
-
-            // Annulé, ou déjà remplacé : une rafale plus récente a posé ses
-            // propres niveaux et lancé sa propre écriture. Toucher à quoi que
-            // ce soit ici l'écraserait avec un instantané d'avant, et la base
-            // rendue au système reculerait en plein geste.
+            // Annulé, ou déjà remplacé : un rappel plus récent a posé sa propre
+            // valeur et lancé sa propre écriture, qu'il ne faut pas écraser.
             guard !Task.isCancelled, generation == mine else { return false }
-
             guard let applied else {
-                // Sans cette branche, l'affichage tenait trois secondes pleines
-                // un niveau que Milō n'avait jamais appliqué — exactement ce
-                // que la lecture du niveau appliqué existe pour éviter.
-                MiloAPIClient.forgetOptimistic(macs: Array(shown.keys))
+                // Sinon l'affichage tiendrait un niveau que Milō n'a jamais
+                // appliqué.
+                MiloAPIClient.forgetOptimistic(macs: [system])
                 MiloAPIClient.trace?("global échoué, affichage rendu à Milō")
                 return true
             }
             if abs(applied - target) > 0.001 {
-                noteShift(shown: shown, to: applied, from: mean)
+                MiloAPIClient.noteOptimistic(mac: system, level: applied)
                 MiloAPIClient.trace?("global appliqué → \(Self.rounded(applied))")
             }
-            return true
         }
-
-        for (mac, target) in wanted {
-            MiloAPIClient.noteOptimistic(mac: mac, level: target)
-        }
-        MiloAPIClient.trace?("par enceinte (\(wanted.count)/\(shown.count))")
-        await withTaskGroup(of: Void.self) { group in
-            for (mac, target) in wanted {
-                group.addTask {
-                    let applied = await MiloAPIClient.writeClientVolume(mac: mac, level: target)
-                    guard !Task.isCancelled, await self.isCurrent(mine) else { return }
-                    guard let applied else {
-                        MiloAPIClient.forgetOptimistic(macs: [mac])
-                        return
-                    }
-                    if abs(applied - target) > 0.001 {
-                        MiloAPIClient.noteOptimistic(mac: mac, level: applied)
-                    }
-                }
-            }
-        }
-        return !Task.isCancelled && generation == mine
-    }
-
-    /// Cet envoi est-il toujours le dernier parti ?
-    ///
-    /// La même garde que sur le chemin global, mais lisible depuis la tâche
-    /// enfant du groupe, qui n'est pas isolée sur l'acteur.
-    private func isCurrent(_ number: UInt64) -> Bool { generation == number }
-
-    /// Répartit un niveau global sur les enceintes en les décalant toutes du
-    /// même écart — la règle que `set_volume_db` applique côté Milō.
-    private func noteShift(shown: [String: Double], to target: Double, from mean: Double) {
-        let delta = target - mean
-        for (mac, level) in shown {
-            MiloAPIClient.noteOptimistic(mac: mac, level: level + delta)
-        }
+        return true
     }
 
     private static func rounded(_ level: Double) -> Double { (level * 1000).rounded() / 1000 }
