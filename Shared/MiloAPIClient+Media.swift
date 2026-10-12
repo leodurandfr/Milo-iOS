@@ -384,6 +384,12 @@ extension MiloAPIClient {
         deviceCount >= 2 && touched >= 2
     }
 
+    /// L'appareil unique qui représente tout le système Milō sur la carte Now
+    /// Playing : son niveau est le global, et il ne s'écrit que par
+    /// `/api/volume/adjust` (un appui) ou `/api/volume/global` (un glissement),
+    /// jamais par client. Pas de deux-points : c'est aussi sa clé « MAC ».
+    static let systemDeviceID = "milo-system"
+
     /// L'écriture par enceinte, une fois le geste retombé.
     ///
     /// Sur l'échelle du curseur, un niveau ne peut plus déclencher le 400 que
@@ -626,6 +632,12 @@ extension MiloAPIClient {
     /// la lecture du niveau appliqué existe précisément pour éviter, et qui ne
     /// servait à rien tant que le cas « pas de réponse du tout » n'était pas
     /// traité.
+    /// Quand la valeur optimiste de cette enceinte a été posée, s'il y en a une.
+    static func optimisticAt(mac: String) -> TimeInterval? {
+        let plain = mac.replacingOccurrences(of: ":", with: "")
+        return UserDefaults(suiteName: appGroupID)?.object(forKey: optimisticVolumeAtKey(plain)) as? Double
+    }
+
     static func forgetOptimistic(macs: [String]) {
         let defaults = UserDefaults(suiteName: appGroupID)
         for mac in macs {
@@ -1110,6 +1122,209 @@ extension GroupVolumeMirror.Reading {
     }
 }
 
+/// Le volume du système Milō tel qu'iOS le tient, sur la carte à un seul
+/// appareil, et ce qu'un rappel de sa part voulait dire.
+///
+/// **Ce qu'iOS fait, mesuré au banc le 12/10/2026** (boutons physiques, écran
+/// verrouillé) : un appui engage G = affiché ± 1/16, puis rappelle l'appareil à
+/// `référence × G / plafond`, et prend G pour plafond et ce qu'il a posé pour
+/// référence. Le rapport référence/plafond ne bouge donc pas d'un appui à
+/// l'autre. Il ne change que quand iOS adopte un niveau rendu hors de ses
+/// commandes : la référence le prend, le plafond ne monte que s'il est dépassé.
+/// Baissé ailleurs de 0,50 à 0,08, ce rapport valait 0,16 au « + » suivant.
+///
+/// Et pendant la seconde qui suit un appui, la carte n'affiche pas notre rendu
+/// mais ce qu'iOS vient de poser : le « + » suivant part de là. Sous un rapport
+/// de 0,157, les « + » rapprochés convergeaient vers 0,0625 / (1 − 0,157), soit
+/// ≈ -77 dB, quel que soit leur nombre.
+///
+/// Un bouton physique ne part donc jamais en absolu : le modèle n'en relit que
+/// le sens, et l'envoi est un cran de Milō (`/api/volume/adjust`). Au pire, un
+/// sens mal relu coûte un cran. Le 12/10 à 23:29:03, une écriture absolue tirée
+/// d'un rapport mal suivi a posé le global à 1 sur un « − » : un client est
+/// passé de 0 à 100 %. Seul un glissement du doigt écrit un niveau, et jamais
+/// plus loin que `maxSlide` de ce qu'on montrait.
+///
+/// Pur, pour être testé avec les chiffres relevés. Rangé dans le conteneur
+/// partagé : l'extension change de processus sans arrêt, iOS garde son état.
+struct SystemVolumeModel: Codable, Equatable {
+
+    /// La session dont iOS tient cet état ; une autre repart de zéro.
+    var session: String?
+    /// Le plafond d'iOS : le G par lequel il divise.
+    var ceiling: Double = 0
+    /// Le niveau qu'iOS tient pour celui de l'appareil.
+    var reference: Double = 0
+    /// Le dernier niveau rendu, celui d'avant, et quand il a changé : un
+    /// niveau inchangé n'est pas adopté, et un appui parti juste avant un
+    /// changement partait encore de l'ancien.
+    var lastSeen: Double?
+    var previousSeen: Double?
+    var seenAt: TimeInterval = 0
+    /// Le dernier appui relu : ce qu'iOS a posé et engagé, et quand.
+    var lastPosed: Double?
+    var lastCommit: Double?
+    var lastAt: TimeInterval = 0
+
+    /// Le cran d'un bouton physique sur une destination externe.
+    static let step = 1.0 / 16
+
+    /// Combien de temps après un appui la carte peut encore afficher ce qu'iOS
+    /// a posé ou engagé plutôt que notre rendu (≈ 1,07 s mesurés, marge comprise).
+    static let shownFor: TimeInterval = 1.5
+
+    /// Combien de temps un niveau qu'on vient de changer peut ne pas encore
+    /// être à l'écran : à 23:29:03.231 le rendu a changé une milliseconde avant
+    /// le rappel d'un appui parti de l'ancien.
+    static let renderLag: TimeInterval = 0.5
+
+    /// L'écart toléré à « affiché ± 1/16 ». L'écart de confirmation (+0,0005) et
+    /// la troncature au centième du Centre de contrôle y tiennent.
+    static let tolerance = 0.012
+
+    /// Le plus loin qu'un rappel de glissement peut écrire de ce qu'on montrait.
+    /// Un doigt rappelle toutes les ~212 ms : il traverse la barre en deux
+    /// secondes, et une lecture fausse ne fait plus sauter le son.
+    static let maxSlide = 0.1
+
+    /// En dessous, un G engagé est nul : iOS y garde ses rapports.
+    static let silent = 0.0001
+
+    /// Ce qu'un rappel voulait dire.
+    struct Reading: Equatable {
+        enum Kind: Equatable {
+            /// Un bouton : un cran de Milō dans ce sens, rien d'autre.
+            case button(up: Bool)
+            /// Un doigt sur la barre : ce niveau global, déjà borné.
+            case slider(level: Double)
+        }
+        var kind: Kind
+        /// Le G qu'iOS a engagé, relu avec le rapport retenu.
+        var commit: Double
+        /// Le rapport retenu : le suivi, ou 1 si iOS est reparti de zéro.
+        var ratio: Double
+    }
+
+    var ratio: Double {
+        guard ceiling > Self.silent, reference > Self.silent else { return 1 }
+        return min(reference / ceiling, 1)
+    }
+
+    /// Ce qu'iOS vient de lire dans `devices`. `duringCommand` : lu pendant un
+    /// rappel `onChange`, que la carte affiche sans l'adopter.
+    mutating func observe(_ level: Double, session id: String, duringCommand: Bool,
+                          now: TimeInterval) {
+        if session != id { self = SystemVolumeModel(session: id) }
+        let changed = lastSeen.map { abs($0 - level) > 0.000_001 } ?? true
+        if changed {
+            previousSeen = lastSeen
+            lastSeen = level
+            seenAt = now
+        }
+        guard ceiling > Self.silent else {
+            ceiling = level
+            reference = level
+            return
+        }
+        guard changed, !duringCommand else { return }
+        reference = level
+        ceiling = max(ceiling, level)
+    }
+
+    /// Relit un rappel : `posed` est ce qu'iOS demande, `shown` ce que nous lui
+    /// avions rendu, sans l'écart de confirmation.
+    mutating func interpret(posed: Double, shown: Double, now: TimeInterval) -> Reading {
+        func clamp(_ level: Double) -> Double { min(max(level, 0), 1) }
+
+        // Ce que la carte pouvait afficher quand l'appui est parti : notre
+        // rendu ; celui d'avant s'il vient de changer ; et, juste après un
+        // appui, ce qu'iOS a posé ou engagé.
+        var displays = [shown]
+        if now - seenAt < Self.renderLag, let previousSeen { displays.append(previousSeen) }
+        if now - lastAt < Self.shownFor {
+            displays += [lastCommit, lastPosed].compactMap { $0 }
+        }
+
+        // Le rapport suivi d'abord ; 1 ensuite, si iOS est reparti de zéro sans
+        // qu'on le voie (point d'accès recréé).
+        var best: (up: Bool, ratio: Double, commit: Double, error: Double)?
+        for ratio in ratio < 1 ? [ratio, 1] : [1] {
+            // iOS n'engage jamais au-delà de 1 : un rapport qui l'y mènerait est
+            // faux, et borner la lecture la ferait passer pour un « + » au
+            // plafond (23:29:03 : 0,9375 / 0,667 = 1,41 pour un « − »).
+            guard posed / ratio <= 1 + Self.tolerance else { continue }
+            let commit = clamp(posed / ratio)
+            for card in displays {
+                for up in [true, false] {
+                    let expected = clamp(card + (up ? Self.step : -Self.step))
+                    let error = abs(commit - expected)
+                    guard error <= Self.tolerance, error < (best?.error ?? .infinity) else { continue }
+                    best = (up, ratio, commit, error)
+                }
+            }
+            if best != nil { break }
+        }
+
+        let reading: Reading
+        if let best {
+            reading = Reading(kind: .button(up: best.up), commit: best.commit, ratio: best.ratio)
+        } else {
+            // Un glissement : le doigt va où il veut, iOS l'a seulement mis à
+            // l'échelle. Borné, parce qu'un appui mal relu arrive ici aussi.
+            let ratio = posed / ratio <= 1 + Self.tolerance ? ratio : 1
+            let commit = clamp(posed / ratio)
+            let level = min(max(commit, shown - Self.maxSlide), shown + Self.maxSlide)
+            reading = Reading(kind: .slider(level: clamp(level)), commit: commit, ratio: ratio)
+        }
+
+        // iOS vient d'engager `commit` : c'est son plafond, et ce qu'il a posé sa
+        // référence. Sauf à zéro, où il garde ses rapports.
+        if reading.commit > Self.silent {
+            ceiling = reading.commit
+            reference = posed
+        }
+        lastPosed = posed
+        lastCommit = reading.commit
+        lastAt = now
+        return reading
+    }
+}
+
+extension SystemVolumeModel {
+
+    static let storeKey = "milo_system_volume_model_v1"
+    private static let storeLock = NSLock()
+
+    /// Lit, modifie et range l'état, sous verrou : `devices` et l'envoi y
+    /// touchent tous deux.
+    @discardableResult
+    static func update<T>(_ body: (inout SystemVolumeModel) -> T) -> T {
+        storeLock.lock()
+        defer { storeLock.unlock() }
+        let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID)
+        var model = defaults?.data(forKey: storeKey)
+            .flatMap { try? JSONDecoder().decode(SystemVolumeModel.self, from: $0) }
+            ?? SystemVolumeModel()
+        let result = body(&model)
+        if let data = try? JSONEncoder().encode(model) {
+            defaults?.set(data, forKey: storeKey)
+        }
+        return result
+    }
+}
+
+extension SystemVolumeModel.Reading {
+    var summary: String {
+        func r(_ level: Double) -> String { String(format: "%.4f", level) }
+        let what: String
+        switch kind {
+        case .button(let up): what = up ? "bouton + → un cran" : "bouton − → un cran"
+        case .slider(let level): what = "glissement → \(r(level))"
+        }
+        return "système \(what) (r=\(r(ratio)) G=\(r(commit)))"
+    }
+}
+
 /// Ne garde que la dernière intention du geste, et décide de sa nature.
 ///
 /// Une seule échéance pour toutes les enceintes, et non plus une par enceinte :
@@ -1238,6 +1453,50 @@ private actor VolumeGesture {
         // instantané.
         let seen = entries.filter { shown[$0.key] != nil }
         let global = MiloAPIClient.isGlobalGesture(touched: seen.count, deviceCount: shown.count)
+
+        // Le système Milō, seul appareil de la carte : un bouton est un cran de
+        // Milō, jamais un niveau ; seul un glissement en écrit un, borné. Voir
+        // `SystemVolumeModel`.
+        let system = MiloAPIClient.systemDeviceID
+        if let posed = seen[system], let level = shown[system] {
+            let reading = SystemVolumeModel.update {
+                $0.interpret(posed: posed, shown: level, now: Date().timeIntervalSince1970)
+            }
+            MiloAPIClient.trace?(reading.summary)
+            switch reading.kind {
+            case .button(let up):
+                let previous = lastStep
+                let step = Task { () -> MiloAPIClient.StepOutcome in
+                    _ = await previous?.value
+                    return await MiloAPIClient.stepVolume(up: up)
+                }
+                lastStep = step
+                let outcome = await step.value
+                guard !Task.isCancelled, generation == mine else { return false }
+                switch outcome {
+                case .applied(let applied):
+                    MiloAPIClient.noteOptimistic(mac: system, level: applied)
+                    MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") → \(Self.rounded(applied))")
+                case .appliedUnknown, .failed:
+                    MiloAPIClient.forgetOptimistic(macs: [system])
+                    MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") : \(outcome == .failed ? "échec" : "niveau à venir par le push")")
+                }
+            case .slider(let target):
+                MiloAPIClient.noteOptimistic(mac: system, level: target)
+                let applied = await MiloAPIClient.writeGlobalVolume(level: target)
+                guard !Task.isCancelled, generation == mine else { return false }
+                guard let applied else {
+                    MiloAPIClient.forgetOptimistic(macs: [system])
+                    MiloAPIClient.trace?("global échoué, affichage rendu à Milō")
+                    return true
+                }
+                if abs(applied - target) > 0.001 {
+                    MiloAPIClient.noteOptimistic(mac: system, level: applied)
+                    MiloAPIClient.trace?("global appliqué → \(Self.rounded(applied))")
+                }
+            }
+            return true
+        }
 
         // Ce que le geste voulait dire, et non ce qu'iOS en a déduit : sous un
         // plafond resté haut, iOS demande moins que l'appui — voire moins que

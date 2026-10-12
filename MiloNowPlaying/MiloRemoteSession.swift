@@ -135,6 +135,15 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// session n'a qu'un nombre limité d'occasions de le faire aboutir et
     /// celle-ci en est une.
     func update(_ attributes: MiloSessionAttributes) {
+        // Plus d'une seconde après notre dernière écriture, un push dit ce que
+        // Milō tient vraiment, changement fait ailleurs compris : la valeur
+        // optimiste ne doit plus le masquer. Elle tenait trois secondes, et
+        // l'appui parti pendant ce temps se relisait sur un niveau périmé
+        // (12/10, 23:29:03 : 0,9995 montré, 0,6667 chez Milō).
+        let system = MiloAPIClient.systemDeviceID
+        if let at = MiloAPIClient.optimisticAt(mac: system), Date().timeIntervalSince1970 - at > 1 {
+            MiloAPIClient.forgetOptimistic(macs: [system])
+        }
         received = attributes
         render()
         checkReachability()
@@ -656,9 +665,24 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         // curseurs pour une seule enceinte, et deux fermetures qui s'écrivent
         // dessus — en plus de faire trapper le `Dictionary` ci-dessous.
         var identifiers = Set<String>()
-        let unique = attributes.devices.reversed()
+        let clients = attributes.devices.reversed()
             .filter { identifiers.insert($0.id).inserted }
             .reversed()
+
+        // iOS ne voit que le système, pas ses clients (décision du 12/10/2026).
+        // Avec plusieurs appareils, iOS dessine la barre de l'écran verrouillé
+        // et du Centre de contrôle à partir du plus fort d'entre eux — jamais la
+        // moyenne, et l'API n'a aucun volume de session — et traduit chaque
+        // appui en niveaux par client selon des proportions qu'il garde
+        // cachées. Un seul appareil, dont le niveau est le global de Milō : la
+        // moyenne de ces mêmes clients (`service.py::_devices` les filtre sur
+        // l'ensemble que `global_volume` moyenne). Les curseurs par pièce du
+        // Centre de contrôle disparaissent, sciemment.
+        let unique = clients.isEmpty ? [] : [MiloSessionAttributes.Device(
+            id: MiloAPIClient.systemDeviceID,
+            name: "Milō",
+            type: "speaker",
+            volume: clients.map(\.volume).reduce(0, +) / Float(clients.count))]
 
         let shown = unique.map { device in
             let (level, base) = Self.displayedVolume(device)
@@ -698,10 +722,12 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         // Tel qu'iOS le reçoit, écart de confirmation compris : c'est ce que la
         // carte affiche, et un appui part de là.
         let during = GroupVolumeMirror.commandInFlight
-        GroupVolumeMirror.update {
-            $0.observe(Dictionary(shown.map {
-                ($0.device.id.replacingOccurrences(of: ":", with: ""), Double($0.level))
-            }, uniquingKeysWith: { _, last in last }), duringCommand: during)
+        if let system = shown.first {
+            let session = id
+            SystemVolumeModel.update {
+                $0.observe(Double(system.level), session: session, duringCommand: during,
+                           now: Date().timeIntervalSince1970)
+            }
         }
 
         return shown.map { device, level, _ in

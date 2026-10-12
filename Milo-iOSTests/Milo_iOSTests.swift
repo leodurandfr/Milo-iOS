@@ -1048,3 +1048,113 @@ struct GroupVolumeMirrorTests {
         #expect(close(elsewhere, 0.3, 0.000001))
     }
 }
+
+/// La carte à un seul appareil, le système Milō : chaque séquence est relevée au
+/// banc le 12/10/2026 (boutons physiques, écran verrouillé, journaux de
+/// MediaRemoteUI et de l'extension). Un bouton ne rend qu'un sens ; un
+/// glissement, un niveau borné.
+struct SystemVolumeModelTests {
+
+    func close(_ a: Double, _ b: Double, _ tolerance: Double = 0.0005) -> Bool {
+        abs(a - b) < tolerance
+    }
+
+    /// Des niveaux rendus hors de toute commande d'iOS : des pushes de Milō,
+    /// une seconde d'écart chacun.
+    func seen(_ model: inout SystemVolumeModel, _ levels: Double..., from start: TimeInterval = 0) {
+        for (i, level) in levels.enumerated() {
+            model.observe(level, session: "s", duringCommand: false, now: start + Double(i))
+        }
+    }
+
+    /// 22:58:22 : baissé ailleurs de 0,50 à 0,08. iOS engage 0,1425 et ne pose
+    /// que 0,0228 (rapport 0,16) — sous le niveau montré, pour un « + ».
+    @Test("Baissé ailleurs, un « + » se relit « + »")
+    func plusAfterLoweredElsewhere() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.50, 0.08)
+        #expect(close(model.ratio, 0.16))
+
+        let reading = model.interpret(posed: 0.0228, shown: 0.08, now: 100)
+        #expect(reading.kind == .button(up: true))
+        #expect(close(reading.commit, 0.1425))
+    }
+
+    /// 22:58:45 : sous un rapport de 0,16, la carte affiche ce qu'iOS vient de
+    /// poser (0,0469) et le « + » rapproché suivant engage 0,1094. Lu comme un
+    /// glissement, Milō plongeait vers -78 dB.
+    @Test("Des « + » rapprochés sous un rapport déréglé restent des « + »")
+    func rapidPlusesStayPluses() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.2308 / 0.16, 0.2308)
+        #expect(close(model.ratio, 0.16))
+
+        #expect(model.interpret(posed: 0.046927, shown: 0.2308, now: 100).kind == .button(up: true))
+        #expect(model.interpret(posed: 0.017508, shown: 0.2594, now: 100.48).kind == .button(up: true))
+        #expect(model.interpret(posed: 0.012801, shown: 0.2880, now: 100.95).kind == .button(up: true))
+    }
+
+    /// 23:29:03 : la carte montrait encore 0,9995 quand le global est tombé à
+    /// 0,6667 ailleurs, une milliseconde avant le rappel d'un « − » (iOS : 0,9375).
+    /// Relu avec un rapport de 0,667, c'était 1,41 : écrit en absolu, le global
+    /// est monté à 1 et un client est passé de 0 à 100 %.
+    @Test("Un « − » parti juste avant un changement fait ailleurs reste un « − »")
+    func minusRacingAnExternalChange() {
+        var model = SystemVolumeModel()
+        seen(&model, 1.0, 0.9995, from: 90)
+        model.observe(0.6667, session: "s", duringCommand: false, now: 100)
+        #expect(close(model.ratio, 0.6667))
+
+        let reading = model.interpret(posed: 0.9375, shown: 0.6667, now: 100.001)
+        #expect(reading.kind == .button(up: false))
+    }
+
+    @Test("iOS sain : l'appui est exactement affiché ± 1/16")
+    func healthy() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.3205)
+        #expect(model.interpret(posed: 0.383, shown: 0.3205, now: 100).kind == .button(up: true))
+        #expect(model.interpret(posed: 0.3205, shown: 0.383, now: 102).kind == .button(up: false))
+    }
+
+    @Test("Un « − » sous le premier cran est un « − »")
+    func downToTheFloor() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.03)
+        #expect(model.interpret(posed: 0, shown: 0.03, now: 100).kind == .button(up: false))
+        // iOS garde ses rapports à zéro : le « + » suivant se relit encore.
+        #expect(close(model.ratio, 1))
+    }
+
+    @Test("Un glissement écrit un niveau, jamais à plus de 0,1 de ce qu'on montrait")
+    func slideIsBounded() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.30)
+        func level(_ reading: SystemVolumeModel.Reading) -> Double? {
+            if case .slider(let level) = reading.kind { return level }
+            return nil
+        }
+        #expect(level(model.interpret(posed: 0.35, shown: 0.30, now: 100)).map { close($0, 0.35) } == true)
+        let far = model.interpret(posed: 1.0, shown: 0.35, now: 103)
+        #expect(level(far).map { close($0, 0.45) } == true)
+    }
+
+    /// iOS est reparti de zéro sans qu'on le voie : le rapport suivi ne lit
+    /// rien, 1 lit l'appui.
+    @Test("Un iOS reparti de zéro en douce se relit quand même")
+    func unseenReset() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.50, 0.08)
+        let reading = model.interpret(posed: 0.1425, shown: 0.08, now: 100)
+        #expect(reading.kind == .button(up: true))
+        #expect(close(reading.ratio, 1))
+    }
+
+    @Test("Une autre session repart de zéro")
+    func newSession() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.50, 0.08)
+        model.observe(0.08, session: "autre", duringCommand: false, now: 10)
+        #expect(close(model.ratio, 1))
+    }
+}
