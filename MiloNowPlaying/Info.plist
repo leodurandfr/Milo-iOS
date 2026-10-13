@@ -23,6 +23,7 @@
 	     indiscernable d'un chemin jamais pris. Mesuré le 19/09/2026 — treize
 	     processus d'extension en quinze minutes, deux lignes relevées, toutes deux
 	     des erreurs. Persister au niveau debug rend la chronologie relisible. -->
+#ifdef MILO_PERSIST_DEBUG_LOGS
 	<key>OSLogPreferences</key>
 	<dict>
 		<key>leodurand.Milo-iOS</key>
@@ -39,5 +40,6 @@
 			</dict>
 		</dict>
 	</dict>
+#endif
 </dict>
 </plist>

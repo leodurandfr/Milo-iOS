@@ -496,6 +496,8 @@
 				DEVELOPMENT_TEAM = 7C2S8B9978;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Milo-iOS/Info.plist";
+				INFOPLIST_PREPROCESS = YES;
+				INFOPLIST_PREPROCESSOR_DEFINITIONS = MILO_PERSIST_DEBUG_LOGS;
 				INFOPLIST_KEY_CFBundleDisplayName = "Milō";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Milō est piloté directement sur votre réseau, sans passer par Internet.";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -531,6 +533,7 @@
 				DEVELOPMENT_TEAM = 7C2S8B9978;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Milo-iOS/Info.plist";
+				INFOPLIST_PREPROCESS = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Milō";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Milō est piloté directement sur votre réseau, sans passer par Internet.";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -814,6 +817,8 @@
 				DEVELOPMENT_TEAM = 7C2S8B9978;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = MiloNowPlaying/Info.plist;
+				INFOPLIST_PREPROCESS = YES;
+				INFOPLIST_PREPROCESSOR_DEFINITIONS = MILO_PERSIST_DEBUG_LOGS;
 				INFOPLIST_KEY_CFBundleDisplayName = MiloNowPlaying;
 				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -841,6 +846,7 @@
 				DEVELOPMENT_TEAM = 7C2S8B9978;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = MiloNowPlaying/Info.plist;
+				INFOPLIST_PREPROCESS = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = MiloNowPlaying;
 				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
 				LD_RUNPATH_SEARCH_PATHS = (

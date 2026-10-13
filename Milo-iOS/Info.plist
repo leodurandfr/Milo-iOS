@@ -7,6 +7,7 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+#ifdef MILO_PERSIST_DEBUG_LOGS
 	<key>OSLogPreferences</key>
 	<dict>
 		<key>leodurand.Milo-iOS</key>
@@ -23,6 +24,7 @@
 			</dict>
 		</dict>
 	</dict>
+#endif
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
