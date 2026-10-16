@@ -206,7 +206,7 @@ extension MiloAPIClient {
         // réponse : un 400 — le refus qu'une unité oppose à une commande qu'elle
         // ne connaît pas — y devenait indiscernable d'un succès, et c'est
         // précisément la distinction pour laquelle cette trace existe. Même
-        // raison que dans `writeClientVolume`.
+        // raison que dans `stepVolume`.
         // Deux essais courts plutôt qu'un long — quand c'est possible et licite.
         //
         // L'échec mesuré n'est pas un refus : c'est une connexion qui n'aboutit
@@ -289,8 +289,8 @@ extension MiloAPIClient {
 
     /// L'appareil unique qui représente tout le système Milō sur la carte Now
     /// Playing : son niveau est le global, et il ne s'écrit que par
-    /// `/api/volume/adjust` (un appui) ou `/api/volume/global` (un glissement),
-    /// jamais par client. Pas de deux-points : c'est aussi sa clé « MAC ».
+    /// `/api/volume/adjust`, un cran à la fois, jamais en absolu ni par
+    /// client. Pas de deux-points : c'est aussi sa clé « MAC ».
     static let systemDeviceID = "milo-system"
 
     /// Ce qu'a donné un appui envoyé comme « un cran ».
@@ -347,66 +347,6 @@ extension MiloAPIClient {
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         guard let level = (json?["volume"] as? NSNumber)?.doubleValue else { return .appliedUnknown }
         return .applied(min(max(level, 0), 1))
-    }
-
-    /// Le volume global, en une requête.
-    ///
-    /// Milō décale tous les clients du même écart sous `_volume_lock`, ce qui est
-    /// le seul endroit où ça peut être atomique. Trois écritures absolues
-    /// concurrentes aboutissaient aussi — vérifié — mais chacune posait un
-    /// niveau calculé de son côté, et l'équilibre entre les pièces s'écartait à
-    /// chaque geste.
-    fileprivate static func writeGlobalVolume(level: Double) async -> Double? {
-        await writeVolume(path: "/api/volume/global",
-                          body: ["volume": level, "show_bar": true],
-                          label: "global")
-    }
-
-    /// Rend le niveau **appliqué** que Milō renvoie, ou `nil` si rien n'a abouti.
-    ///
-    /// Le niveau appliqué n'est pas toujours celui demandé : la route globale
-    /// borne au lieu de refuser, et une enceinte déjà en butée absorbe moins
-    /// que les autres sans que Milō redistribue la différence. Le lire est ce
-    /// qui évite de tenir trois secondes un affichage que le son n'a pas suivi.
-    private static func writeVolume(path: String, body: [String: Any],
-                                    label: String) async -> Double? {
-        guard let url = URL(string: baseURL() + path) else { return nil }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "PATCH"
-        request.timeoutInterval = 3
-        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        // Le code est lu, contrairement aux commandes de transport : un curseur
-        // qui revient en place sans rien dire est précisément comment
-        // l'encodage du MAC est resté invisible.
-        let defaults = UserDefaults(suiteName: appGroupID)
-        do {
-            let (data, response) = try await lanData(for: request)
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            guard code == 200 else {
-                defaults?.set("\(label) -> HTTP \(code)", forKey: "milo_volume_write_error")
-                return nil
-            }
-            defaults?.removeObject(forKey: "milo_volume_write_error")
-            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            return (json?["volume"] as? NSNumber)?.doubleValue
-        } catch {
-            // Une écriture annulée n'est pas une écriture en panne :
-            // `flush?.cancel()` abandonne délibérément celle qu'une rafale plus
-            // récente vient de remplacer, et c'est le délestage qui fait que la
-            // dernière valeur du geste est la seule à partir. L'enregistrer ici
-            // faisait passer ce délestage pour une coupure réseau dans le seul
-            // journal qui en parle.
-            if error is CancellationError || (error as? URLError)?.code == .cancelled {
-                return nil
-            }
-            defaults?.set("\(label) -> réseau : \(error.localizedDescription)",
-                          forKey: "milo_volume_write_error")
-            return nil
-        }
     }
 
     // MARK: - Valeur optimiste
@@ -625,12 +565,18 @@ enum VolumeCommand {
 /// de 0,157, les « + » rapprochés convergeaient vers 0,0625 / (1 − 0,157), soit
 /// ≈ -77 dB, quel que soit leur nombre.
 ///
-/// Un bouton physique ne part donc jamais en absolu : le modèle n'en relit que
-/// le sens, et l'envoi est un cran de Milō (`/api/volume/adjust`). Au pire, un
+/// Un rappel ne part donc **jamais** en absolu : le modèle n'en relit que le
+/// sens, et l'envoi est un cran de Milō (`/api/volume/adjust`). Au pire, un
 /// sens mal relu coûte un cran. Le 12/10 à 23:29:03, une écriture absolue tirée
 /// d'un rapport mal suivi a posé le global à 1 sur un « − » : un client est
-/// passé de 0 à 100 %. Seul un glissement du doigt écrit un niveau, et jamais
-/// plus loin que `maxSlide` de ce qu'on montrait.
+/// passé de 0 à 100 %.
+///
+/// Un glissement du doigt n'écrit plus de niveau non plus. Le 17/10 à
+/// 00:50:25, le vrai rapport valait 0,909 et le modèle croyait 1 : les appuis
+/// ne tombaient plus sur « affiché ± 1/16 », se lisaient comme des glissements
+/// et s'écrivaient tels quels — un « + » montait de ~2 dB, par coïncidence, et
+/// un « − » descendait de ~6 dB (r/16 − (1 − r) × niveau, dans les deux sens).
+/// Un doigt sur la barre avance donc, lui aussi, cran par cran.
 ///
 /// Pur, pour être testé avec les chiffres relevés. Rangé dans le conteneur
 /// partagé : l'extension change de processus sans arrêt, iOS garde son état.
@@ -665,31 +611,26 @@ struct SystemVolumeModel: Codable, Equatable {
     /// le rappel d'un appui parti de l'ancien.
     static let renderLag: TimeInterval = 0.5
 
-    /// L'écart toléré à « affiché ± 1/16 ». L'écart de confirmation (+0,0005) et
-    /// la troncature au centième du Centre de contrôle y tiennent.
-    static let tolerance = 0.012
-
-    /// Le plus loin qu'un rappel de glissement peut écrire de ce qu'on montrait.
-    /// Un doigt rappelle toutes les ~212 ms : il traverse la barre en deux
-    /// secondes, et une lecture fausse ne fait plus sauter le son.
-    static let maxSlide = 0.1
+    /// L'écart relatif toléré entre le rapport qu'un appui suppose et celui
+    /// qu'on suit. Le « + » et le « − » d'un même affichage supposent des
+    /// rapports dans un facteur (affiché + 1/16) / (affiché − 1/16), jamais
+    /// moins de 1,13 : les confondre demanderait trois fois cet écart.
+    static let tolerance = 0.04
 
     /// En dessous, un G engagé est nul : iOS y garde ses rapports.
     static let silent = 0.0001
 
-    /// Ce qu'un rappel voulait dire.
+    /// Ce qu'un rappel voulait dire : un cran de Milō dans ce sens, rien
+    /// d'autre.
     struct Reading: Equatable {
-        enum Kind: Equatable {
-            /// Un bouton : un cran de Milō dans ce sens, rien d'autre.
-            case button(up: Bool)
-            /// Un doigt sur la barre : ce niveau global, déjà borné.
-            case slider(level: Double)
-        }
-        var kind: Kind
-        /// Le G qu'iOS a engagé, relu avec le rapport retenu.
-        var commit: Double
-        /// Le rapport retenu : le suivi, ou 1 si iOS est reparti de zéro.
-        var ratio: Double
+        var up: Bool
+        /// Le G qu'iOS a engagé et le rapport par lequel il l'a multiplié,
+        /// quand un appui l'explique ; le rapport manque à zéro.
+        var commit: Double?
+        var ratio: Double?
+        /// Le sens seul a été relu ; le rapport, s'il y en a un, n'est qu'une
+        /// estimation.
+        var guessed = false
     }
 
     var ratio: Double {
@@ -721,59 +662,77 @@ struct SystemVolumeModel: Codable, Equatable {
     /// Relit un rappel : `posed` est ce qu'iOS demande, `shown` ce que nous lui
     /// avions rendu, sans l'écart de confirmation.
     mutating func interpret(posed: Double, shown: Double, now: TimeInterval) -> Reading {
-        func clamp(_ level: Double) -> Double { min(max(level, 0), 1) }
-
         // Ce que la carte pouvait afficher quand l'appui est parti : notre
         // rendu ; celui d'avant s'il vient de changer ; et, juste après un
         // appui, ce qu'iOS a posé ou engagé.
         var displays = [shown]
         if now - seenAt < Self.renderLag, let previousSeen { displays.append(previousSeen) }
-        if now - lastAt < Self.shownFor {
-            displays += [lastCommit, lastPosed].compactMap { $0 }
-        }
+        let recent = now - lastAt < Self.shownFor
+        if recent { displays += [lastCommit, lastPosed].compactMap { $0 } }
 
-        // Le rapport suivi d'abord ; 1 ensuite, si iOS est reparti de zéro sans
-        // qu'on le voie (point d'accès recréé).
-        var best: (up: Bool, ratio: Double, commit: Double, error: Double)?
-        for ratio in ratio < 1 ? [ratio, 1] : [1] {
-            // iOS n'engage jamais au-delà de 1 : un rapport qui l'y mènerait est
-            // faux, et borner la lecture la ferait passer pour un « + » au
-            // plafond (23:29:03 : 0,9375 / 0,667 = 1,41 pour un « − »).
-            guard posed / ratio <= 1 + Self.tolerance else { continue }
-            let commit = clamp(posed / ratio)
-            for card in displays {
-                for up in [true, false] {
-                    let expected = clamp(card + (up ? Self.step : -Self.step))
-                    let error = abs(commit - expected)
-                    guard error <= Self.tolerance, error < (best?.error ?? .infinity) else { continue }
-                    best = (up, ratio, commit, error)
-                }
-            }
-            if best != nil { break }
-        }
-
-        let reading: Reading
-        if let best {
-            reading = Reading(kind: .button(up: best.up), commit: best.commit, ratio: best.ratio)
-        } else {
-            // Un glissement : le doigt va où il veut, iOS l'a seulement mis à
-            // l'échelle. Borné, parce qu'un appui mal relu arrive ici aussi.
-            let ratio = posed / ratio <= 1 + Self.tolerance ? ratio : 1
-            let commit = clamp(posed / ratio)
-            let level = min(max(commit, shown - Self.maxSlide), shown + Self.maxSlide)
-            reading = Reading(kind: .slider(level: clamp(level)), commit: commit, ratio: ratio)
-        }
+        // Rien de reconnu — un rapport qui a bougé sans qu'on le voie, ou un
+        // doigt sur la barre : le sens seul. Pour un même rapport, iOS pose plus
+        // haut sur un « + » et plus bas sur un « − », que ce soit par rapport à
+        // son dernier appui ou à ce qu'on lui montrait. Et l'appui de ce sens
+        // le plus proche du rapport suivi donne le nouveau : sans lui, un
+        // rapport faux le resterait, et chaque appui ne serait relu qu'au sens.
+        let candidates = Self.candidates(posed, among: displays)
+        let reading = recognize(candidates) ?? {
+            let up = posed > (recent ? lastPosed : nil) ?? shown * ratio
+            var guess = candidates.filter { $0.up == up }
+                .min { error($0, ratio) < error($1, ratio) } ?? Reading(up: up)
+            guess.guessed = true
+            return guess
+        }()
 
         // iOS vient d'engager `commit` : c'est son plafond, et ce qu'il a posé sa
         // référence. Sauf à zéro, où il garde ses rapports.
-        if reading.commit > Self.silent {
-            ceiling = reading.commit
+        if let commit = reading.commit, commit > Self.silent {
+            ceiling = commit
             reference = posed
         }
         lastPosed = posed
         lastCommit = reading.commit
         lastAt = now
         return reading
+    }
+
+    /// Chaque appui qui a pu poser `posed` : une carte, un sens, et le rapport
+    /// qu'il suppose — jamais au-delà de 1, qu'iOS n'emploie pas.
+    private static func candidates(_ posed: Double, among displays: [Double]) -> [Reading] {
+        displays.flatMap { card in
+            [true, false].compactMap { up -> Reading? in
+                let commit = min(max(card + (up ? step : -step), 0), 1)
+                // Engagé à zéro, iOS pose zéro et garde son rapport.
+                guard commit > silent else { return posed <= silent ? Reading(up: up, commit: 0) : nil }
+                let ratio = posed / commit
+                guard ratio > silent, ratio <= 1 + tolerance else { return nil }
+                return Reading(up: up, commit: commit, ratio: ratio)
+            }
+        }
+    }
+
+    /// L'appui qui s'accorde au rapport suivi — ou à 1, si iOS est reparti de
+    /// zéro sans qu'on le voie (point d'accès recréé).
+    ///
+    /// Le critère est le **rapport**, pas le niveau : à rapport faux, l'écart
+    /// en niveau grandit avec le niveau, et une tolérance en niveau laissait
+    /// passer un rapport de 1 pour 0,909 en bas de course puis le perdait plus
+    /// haut (17/10, 00:50:25).
+    private func recognize(_ candidates: [Reading]) -> Reading? {
+        for prior in ratio < 1 ? [ratio, 1] : [1] {
+            if let best = candidates.min(by: { error($0, prior) < error($1, prior) }),
+               error(best, prior) <= Self.tolerance {
+                return best
+            }
+        }
+        return nil
+    }
+
+    /// L'écart relatif d'un appui au rapport `prior` ; nul pour un appui engagé
+    /// à zéro, qui s'accorde à tous.
+    private func error(_ reading: Reading, _ prior: Double) -> Double {
+        reading.ratio.map { abs($0 - prior) / prior } ?? 0
     }
 }
 
@@ -803,12 +762,10 @@ extension SystemVolumeModel {
 extension SystemVolumeModel.Reading {
     var summary: String {
         func r(_ level: Double) -> String { String(format: "%.4f", level) }
-        let what: String
-        switch kind {
-        case .button(let up): what = up ? "bouton + → un cran" : "bouton − → un cran"
-        case .slider(let level): what = "glissement → \(r(level))"
-        }
-        return "système \(what) (r=\(r(ratio)) G=\(r(commit)))"
+        var what = "système \(up ? "+" : "−") → un cran"
+        if guessed { what += ", sens seul" }
+        guard let commit else { return what }
+        return "\(what) (\(ratio.map { "r=\(r($0)) " } ?? "")G=\(r(commit)))"
     }
 }
 
@@ -872,9 +829,8 @@ private actor VolumeGesture {
         return await task.value
     }
 
-    /// Un rappel coalescé part d'ici, et d'ici seulement : un bouton est un cran
-    /// de Milō, jamais un niveau ; seul un glissement en écrit un, borné. Voir
-    /// `SystemVolumeModel`.
+    /// Un rappel coalescé part d'ici, et d'ici seulement : un cran de Milō dans
+    /// le sens relu, jamais un niveau. Voir `SystemVolumeModel`.
     ///
     /// Rend `true` quand cet envoi a posé une valeur optimiste et qu'aucun plus
     /// récent ne l'a remplacé en route — y compris sur un échec, où l'affichage
@@ -892,49 +848,30 @@ private actor VolumeGesture {
         }
         MiloAPIClient.trace?(reading.summary)
 
-        switch reading.kind {
-        case .button(let up):
-            // Pas de repli sur un niveau absolu : un échec n'y gagnerait rien,
-            // et un envoi qui aurait abouti sans réponse deviendrait un second
-            // changement.
-            let previous = lastStep
-            let step = Task { () -> MiloAPIClient.StepOutcome in
-                _ = await previous?.value
-                return await MiloAPIClient.stepVolume(up: up)
-            }
-            lastStep = step
-            let outcome = await step.value
-            guard !Task.isCancelled, generation == mine else { return false }
-            switch outcome {
-            case .applied(let applied):
-                MiloAPIClient.noteOptimistic(mac: system, level: applied)
-                MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") → \(Self.rounded(applied))")
-            case .appliedUnknown:
-                // L'affichage revient à ce que Milō rapporte : le push suit.
-                MiloAPIClient.forgetOptimistic(macs: [system])
-                MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") → niveau à venir par le push")
-            case .failed:
-                MiloAPIClient.forgetOptimistic(macs: [system])
-                MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") : échec")
-            }
-
-        case .slider(let target):
-            MiloAPIClient.noteOptimistic(mac: system, level: target)
-            let applied = await MiloAPIClient.writeGlobalVolume(level: target)
-            // Annulé, ou déjà remplacé : un rappel plus récent a posé sa propre
-            // valeur et lancé sa propre écriture, qu'il ne faut pas écraser.
-            guard !Task.isCancelled, generation == mine else { return false }
-            guard let applied else {
-                // Sinon l'affichage tiendrait un niveau que Milō n'a jamais
-                // appliqué.
-                MiloAPIClient.forgetOptimistic(macs: [system])
-                MiloAPIClient.trace?("global échoué, affichage rendu à Milō")
-                return true
-            }
-            if abs(applied - target) > 0.001 {
-                MiloAPIClient.noteOptimistic(mac: system, level: applied)
-                MiloAPIClient.trace?("global appliqué → \(Self.rounded(applied))")
-            }
+        // Pas de repli sur un niveau absolu : un échec n'y gagnerait rien, et un
+        // envoi qui aurait abouti sans réponse deviendrait un second changement.
+        let up = reading.up
+        let previous = lastStep
+        let step = Task { () -> MiloAPIClient.StepOutcome in
+            _ = await previous?.value
+            return await MiloAPIClient.stepVolume(up: up)
+        }
+        lastStep = step
+        let outcome = await step.value
+        // Annulé, ou déjà remplacé : un rappel plus récent posera sa propre
+        // valeur, qu'il ne faut pas écraser.
+        guard !Task.isCancelled, generation == mine else { return false }
+        switch outcome {
+        case .applied(let applied):
+            MiloAPIClient.noteOptimistic(mac: system, level: applied)
+            MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") → \(Self.rounded(applied))")
+        case .appliedUnknown:
+            // L'affichage revient à ce que Milō rapporte : le push suit.
+            MiloAPIClient.forgetOptimistic(macs: [system])
+            MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") → niveau à venir par le push")
+        case .failed:
+            MiloAPIClient.forgetOptimistic(macs: [system])
+            MiloAPIClient.trace?("cran Milō \(up ? "+" : "−") : échec")
         }
         return true
     }

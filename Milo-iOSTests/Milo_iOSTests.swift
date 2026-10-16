@@ -472,8 +472,8 @@ struct TrackIDTests {
 
 /// La carte à un seul appareil, le système Milō : chaque séquence est relevée au
 /// banc le 12/10/2026 (boutons physiques, écran verrouillé, journaux de
-/// MediaRemoteUI et de l'extension). Un bouton ne rend qu'un sens ; un
-/// glissement, un niveau borné.
+/// MediaRemoteUI et de l'extension). Un rappel ne rend qu'un sens : c'est un
+/// cran de Milō, jamais un niveau.
 struct SystemVolumeModelTests {
 
     func close(_ a: Double, _ b: Double, _ tolerance: Double = 0.0005) -> Bool {
@@ -497,8 +497,8 @@ struct SystemVolumeModelTests {
         #expect(close(model.ratio, 0.16))
 
         let reading = model.interpret(posed: 0.0228, shown: 0.08, now: 100)
-        #expect(reading.kind == .button(up: true))
-        #expect(close(reading.commit, 0.1425))
+        #expect(reading.up)
+        #expect(reading.commit.map { close($0, 0.1425) } == true)
     }
 
     /// 22:58:45 : sous un rapport de 0,16, la carte affiche ce qu'iOS vient de
@@ -510,9 +510,9 @@ struct SystemVolumeModelTests {
         seen(&model, 0.2308 / 0.16, 0.2308)
         #expect(close(model.ratio, 0.16))
 
-        #expect(model.interpret(posed: 0.046927, shown: 0.2308, now: 100).kind == .button(up: true))
-        #expect(model.interpret(posed: 0.017508, shown: 0.2594, now: 100.48).kind == .button(up: true))
-        #expect(model.interpret(posed: 0.012801, shown: 0.2880, now: 100.95).kind == .button(up: true))
+        #expect(model.interpret(posed: 0.046927, shown: 0.2308, now: 100).up)
+        #expect(model.interpret(posed: 0.017508, shown: 0.2594, now: 100.48).up)
+        #expect(model.interpret(posed: 0.012801, shown: 0.2880, now: 100.95).up)
     }
 
     /// 23:29:03 : la carte montrait encore 0,9995 quand le global est tombé à
@@ -527,37 +527,75 @@ struct SystemVolumeModelTests {
         #expect(close(model.ratio, 0.6667))
 
         let reading = model.interpret(posed: 0.9375, shown: 0.6667, now: 100.001)
-        #expect(reading.kind == .button(up: false))
+        #expect(reading.up == false)
     }
 
     @Test("iOS sain : l'appui est exactement affiché ± 1/16")
     func healthy() {
         var model = SystemVolumeModel()
         seen(&model, 0.3205)
-        #expect(model.interpret(posed: 0.383, shown: 0.3205, now: 100).kind == .button(up: true))
-        #expect(model.interpret(posed: 0.3205, shown: 0.383, now: 102).kind == .button(up: false))
+        #expect(model.interpret(posed: 0.383, shown: 0.3205, now: 100).up)
+        #expect(model.interpret(posed: 0.3205, shown: 0.383, now: 102).up == false)
     }
 
     @Test("Un « − » sous le premier cran est un « − »")
     func downToTheFloor() {
         var model = SystemVolumeModel()
         seen(&model, 0.03)
-        #expect(model.interpret(posed: 0, shown: 0.03, now: 100).kind == .button(up: false))
+        #expect(model.interpret(posed: 0, shown: 0.03, now: 100).up == false)
         // iOS garde ses rapports à zéro : le « + » suivant se relit encore.
         #expect(close(model.ratio, 1))
     }
 
-    @Test("Un glissement écrit un niveau, jamais à plus de 0,1 de ce qu'on montrait")
-    func slideIsBounded() {
+    /// 17/10, 00:50:25 → 00:50:30 : quatre « + » puis trois « − » puis deux
+    /// « + », appuis à ~0,6 s, sous un rapport de 0,909 que le modèle croyait
+    /// à 1. Relus comme des glissements et écrits tels quels, les « + »
+    /// montaient de ~2 dB et les « − » descendaient de ~6 dB. `shown` est ce
+    /// que Milō rendait après chacun de ses crans de 2 dB.
+    @Test("Un rapport mal suivi coûte au pire le sens, jamais un saut")
+    func driftedRatioKeepsTheDirection() {
         var model = SystemVolumeModel()
-        seen(&model, 0.30)
-        func level(_ reading: SystemVolumeModel.Reading) -> Double? {
-            if case .slider(let level) = reading.kind { return level }
-            return nil
+        seen(&model, 0.1716)
+        #expect(close(model.ratio, 1))
+
+        let presses: [(posed: Double, shown: Double, at: TimeInterval, up: Bool)] = [
+            (0.21268801, 0.1716, 100.000, true),
+            (0.2500179, 0.2002, 100.797, true),
+            (0.28393343, 0.2288, 101.465, true),
+            (0.31474686, 0.2574, 102.080, true),
+            (0.22917508, 0.2860, 102.690, false),
+            (0.15143012, 0.2574, 103.363, false),
+            (0.080796115, 0.2288, 104.080, false),
+            (0.13018952, 0.2002, 104.831, true),
+            (0.17506516, 0.2288, 105.450, true),
+        ]
+        for (i, press) in presses.enumerated() {
+            let reading = model.interpret(posed: press.posed, shown: press.shown, now: press.at)
+            #expect(reading.up == press.up)
+            // Le premier ne se relit qu'au sens, et il apprend le rapport : les
+            // suivants sont reconnus.
+            #expect(reading.guessed == (i == 0))
         }
-        #expect(level(model.interpret(posed: 0.35, shown: 0.30, now: 100)).map { close($0, 0.35) } == true)
-        let far = model.interpret(posed: 1.0, shown: 0.35, now: 103)
-        #expect(level(far).map { close($0, 0.45) } == true)
+        #expect(close(model.ratio, 0.9086, 0.001))
+    }
+
+    /// Le même rapport, cette fois suivi : chaque appui est reconnu.
+    @Test("Un rapport bien suivi reconnaît chaque appui")
+    func trackedRatioRecognizesPresses() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.1716 / 0.9086, 0.1716)
+        #expect(close(model.ratio, 0.9086, 0.001))
+
+        let first = model.interpret(posed: 0.21268801, shown: 0.1716, now: 100)
+        #expect(first.up && !first.guessed)
+        #expect(first.ratio.map { close($0, 0.9086, 0.002) } == true)
+        let second = model.interpret(posed: 0.2500179, shown: 0.2002, now: 100.797)
+        #expect(second.up)
+        #expect(second.commit.map { close($0, 0.2752, 0.001) } == true)
+        // 0,9086 × (0,2500 − 1/16)
+        let third = model.interpret(posed: 0.17034, shown: 0.2288, now: 101.4)
+        #expect(third.up == false)
+        #expect(!third.guessed)
     }
 
     /// iOS est reparti de zéro sans qu'on le voie : le rapport suivi ne lit
@@ -567,8 +605,8 @@ struct SystemVolumeModelTests {
         var model = SystemVolumeModel()
         seen(&model, 0.50, 0.08)
         let reading = model.interpret(posed: 0.1425, shown: 0.08, now: 100)
-        #expect(reading.kind == .button(up: true))
-        #expect(close(reading.ratio, 1))
+        #expect(reading.up)
+        #expect(reading.ratio.map { close($0, 1) } == true)
     }
 
     @Test("Une autre session repart de zéro")

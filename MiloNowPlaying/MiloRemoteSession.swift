@@ -654,10 +654,9 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// cachées. Les curseurs par pièce du Centre de contrôle disparaissent,
     /// sciemment.
     ///
-    /// Le niveau arrive normalisé 0…1 de Milō, et repart tel quel : Milō accepte
-    /// `volume` sur cette même échelle, et l'extension ne convertit rien en
-    /// décibels. Ce qu'un rappel veut dire — un cran ou un glissement — se
-    /// décide dans `SystemVolumeModel`.
+    /// Le niveau arrive normalisé 0…1 de Milō, et l'extension ne convertit rien
+    /// en décibels. Un rappel ne repart jamais en niveau : c'est un cran de
+    /// Milō, dont `SystemVolumeModel` relit le sens.
     var devices: [MediaDevice] {
         miloLog.notice("devices lu : \(self.attributes.devices.count, privacy: .public) enceinte(s)")
         _ = volumeEcho
