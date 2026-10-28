@@ -22,7 +22,8 @@ widget to the Home Screen, and shows what Milō plays on the lock screen.
   full screen and without the browser's bars. It reconnects by itself when Milō restarts or
   the phone comes back on the network.
 - **A Home Screen widget**: two buttons to turn Milō's volume down or up. The level shows for
-  a few seconds after a press, and the Milō logo dims while Milō cannot be reached.
+  a few seconds after a press, and the Milō logo dims while the widget cannot change Milō's
+  volume (Milō unreachable, or not in charge of the volume).
 - **The lock screen, Control Center and the Dynamic Island** (iOS 27): the track, its cover
   and its progress, the buttons the current source accepts, and Milō's volume. The volume
   buttons on the side of the iPhone move Milō's volume one step at a time. Commands go
@@ -30,14 +31,15 @@ widget to the Home Screen, and shows what Milō plays on the lock screen.
 
 ## Install
 
-Milō iOS is not on the App Store. It installs from Xcode, on an iPhone you own.
+Milō iOS is not on the App Store yet. It installs from Xcode, on an iPhone you own.
 
 1. Open `Milo-iOS.xcodeproj` in Xcode 27 or later (the lock-screen extension is built against
    the iOS 27 SDK).
 2. Select your Apple team under *Signing & Capabilities* for the three targets: `Milo-iOS`,
    `MiloWidgetExtension` and `MiloNowPlayingExtension`. With a team other than the original
    one, change the bundle identifiers and the App Group (`group.leodurand.Milo-iOS`) to ones
-   your team owns.
+   your team owns. The App Group is also named in code, as `appGroupID` in
+   `Shared/MiloAPIClient.swift`.
 3. Run the `Milo-iOS` scheme on your iPhone.
 
 ## Push from Milō
