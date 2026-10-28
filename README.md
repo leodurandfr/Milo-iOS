@@ -52,3 +52,7 @@ so a build under another team changes them there too.
 
 Without a key, Milō works as usual and sends nothing: the lock-screen player then shows only
 while the app is open, and the widget refreshes on iOS's own schedule.
+
+## License
+
+[MIT](LICENSE)
