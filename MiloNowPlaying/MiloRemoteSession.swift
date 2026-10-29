@@ -141,8 +141,13 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         // l'appui parti pendant ce temps se relisait sur un niveau périmé
         // (12/10, 23:29:03 : 0,9995 montré, 0,6667 chez Milō).
         let system = MiloAPIClient.systemDeviceID
+        //
+        // Seule la fenêtre se ferme : le niveau demandé reste, et avec lui
+        // l'écart de confirmation tant que Milō rapporte ce niveau. L'effacer
+        // aussi faisait bouger le rendu de 0,0005 hors commande (15:11:52.104,
+        // 0,321 → 0,3205), et le « + » suivant se relisait « − ».
         if let at = MiloAPIClient.optimisticAt(mac: system), Date().timeIntervalSince1970 - at > 1 {
-            MiloAPIClient.forgetOptimistic(macs: [system])
+            MiloAPIClient.expireOptimistic(macs: [system])
         }
         received = attributes
         render()

@@ -135,6 +135,27 @@ struct OptimisticLevelTests {
         #expect(MiloAPIClient.optimisticLevel(mac: mac) == nil)
     }
 
+    /// 29/10, 15:11:52.103 : un push arrivé 2,2 s après notre cran fermait la
+    /// fenêtre en effaçant aussi le niveau demandé, et le rendu perdait son
+    /// écart hors commande (0,321 → 0,3205). La fenêtre se ferme, l'écart reste.
+    @Test("Un push tardif ferme la fenêtre sans faire perdre l'écart de confirmation")
+    func aLatePushKeepsTheConfirmationOffset() {
+        let mac = "aabbccdd0007"
+        forget(mac)
+        defer { forget(mac) }
+
+        MiloAPIClient.noteOptimistic(mac: mac, level: 0.3205)
+        MiloAPIClient.expireOptimistic(macs: [mac])
+
+        #expect(MiloAPIClient.optimisticLevel(mac: mac) == nil)
+        #expect(MiloAPIClient.optimisticAt(mac: mac) == nil)
+        let confirmed = MiloAPIClient.lastRequestedLevel(mac: mac)
+        #expect(confirmed == 0.3205)
+        let shown = MiloAPIClient.displayedLevel(optimistic: nil, reported: 0.3205,
+                                                 confirmed: confirmed)
+        #expect(abs(shown - 0.321) < 0.000_001)
+    }
+
     @Test("L'oubli accepte une MAC à deux-points comme l'écriture")
     func forgettingAcceptsAColonedMac() {
         // `forgetOptimistic` est appelé avec les clés de l'instantané, qui
@@ -615,5 +636,86 @@ struct SystemVolumeModelTests {
         seen(&model, 0.50, 0.08)
         model.observe(0.08, session: "autre", duringCommand: false, now: 10)
         #expect(close(model.ratio, 1))
+    }
+
+    /// 29/10, 15:11:49 → 15:11:53 : un push tardif fait perdre au rendu son
+    /// écart de confirmation hors commande (0,321 → 0,3205). iOS l'ignore et
+    /// engage encore depuis 0,321 à 0,431 ; le modèle l'adoptait, suivait 1, et
+    /// relisait le « + » suivant « − » au sens seul.
+    @Test("Un écart de confirmation perdu sur un push n'efface pas le rapport")
+    func confirmationOffsetLostOnAPush() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.4364 / 0.43101, 0.4364)
+        #expect(close(model.ratio, 0.4310, 0.001))
+        #expect(model.interpret(posed: 0.1611551, shown: 0.4359, now: 49.010).up == false)
+        model.observe(0.3979, session: "s", duringCommand: true, now: 49.027)
+        #expect(model.interpret(posed: 0.042521458, shown: 0.3974, now: 49.497).up == false)
+        model.observe(0.3595, session: "s", duringCommand: true, now: 49.521)
+        #expect(model.interpret(posed: 0, shown: 0.3590, now: 49.876).up == false)
+        model.observe(0.3210, session: "s", duringCommand: true, now: 49.901)
+
+        model.observe(0.3205, session: "s", duringCommand: false, now: 52.104)
+        #expect(close(model.ratio, 0.4310, 0.001))
+
+        let reading = model.interpret(posed: 0.16529281, shown: 0.3205, now: 53.628)
+        #expect(reading.up)
+        #expect(!reading.guessed)
+        // 0,16529 = 0,43101 × (0,321 + 1/16) : l'affichage d'iOS, écart compris.
+        #expect(reading.commit.map { close($0, 0.3835, 0.0002) } == true)
+    }
+
+    /// L'état resté dans le conteneur après la trace du 29/10 : plafond et
+    /// référence à 0,3974, soit un rapport de 1, quand iOS tient 0,431. Il doit
+    /// se relire tel quel, et son dernier appui (0,1612 / 0,3734) redonner le
+    /// rapport.
+    @Test("L'état rangé avant la correction relit le premier appui")
+    func storedStateFromBeforeTheFix() throws {
+        let json = #"""
+            {"session":"s","ceiling":0.3974,"reference":0.3974,"lastSeen":0.3974,
+             "previousSeen":0.3979,"seenAt":62.61,"lastPosed":0.1611551,
+             "lastCommit":0.3734,"lastAt":61.416}
+            """#
+        let stored = try JSONDecoder().decode(SystemVolumeModel.self, from: Data(json.utf8))
+        #expect(close(stored.ratio, 1))
+
+        var plus = stored
+        let up = plus.interpret(posed: 0.43101 * (0.3979 + 1.0 / 16), shown: 0.3974, now: 100)
+        #expect(up.up && !up.guessed)
+        var minus = stored
+        let down = minus.interpret(posed: 0.43101 * (0.3979 - 1.0 / 16), shown: 0.3974, now: 100)
+        #expect(!down.up && !down.guessed)
+    }
+
+    /// Un niveau que le modèle adopte et pas iOS — ici 0,0015 hors commande,
+    /// un seuil d'iOS qu'on ne connaît pas — ne fait pas oublier le rapport
+    /// reconnu.
+    @Test("Le dernier rapport reconnu survit à une adoption qu'iOS n'a pas faite")
+    func anchorSurvivesAnUnsharedAdoption() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.3210 / 0.431, 0.3210)
+        #expect(model.interpret(posed: 0.431 * (0.3210 + 1.0 / 16), shown: 0.3210, now: 100).up)
+        model.observe(0.3595, session: "s", duringCommand: true, now: 100.05)
+        model.observe(0.3610, session: "s", duringCommand: false, now: 103)
+        #expect(model.ratio > 0.9)
+
+        let reading = model.interpret(posed: 0.431 * (0.3595 + 1.0 / 16), shown: 0.3610, now: 104)
+        #expect(reading.up)
+        #expect(!reading.guessed)
+    }
+
+    /// En bas de course, juste après un appui engagé à zéro, le « − » suivant
+    /// part de notre rendu : 0,0005 de trop dans `shown` le faisait écarter
+    /// (rapport > 1,04) et relire « + ».
+    @Test("En bas de course, un « − » après un appui à zéro reste un « − »")
+    func minusAfterAZeroCommitAtTheBottom() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.1205 / 0.431, 0.1205)
+        #expect(model.interpret(posed: 0.431 * (0.1205 - 1.0 / 16), shown: 0.1200, now: 100).up == false)
+        model.observe(0.0919, session: "s", duringCommand: true, now: 100.06)
+        #expect(model.interpret(posed: 0, shown: 0.0914, now: 100.45).up == false)
+        model.observe(0.0633, session: "s", duringCommand: true, now: 100.51)
+
+        let reading = model.interpret(posed: 0.431 * (0.0633 - 1.0 / 16), shown: 0.0628, now: 101.65)
+        #expect(reading.up == false)
     }
 }

@@ -478,6 +478,19 @@ extension MiloAPIClient {
         }
     }
 
+    /// Ferme la fenêtre optimiste sans oublier ce qu'on a demandé : Milō
+    /// reprend la main sur l'affichage, mais ce qu'il confirme de notre
+    /// demande se rend à l'identique, écart compris. Voir `displayedLevel` :
+    /// `forgetOptimistic` efface aussi `confirmed`, et le rendu perd alors son
+    /// écart hors de toute commande d'iOS.
+    static func expireOptimistic(macs: [String]) {
+        let defaults = UserDefaults(suiteName: appGroupID)
+        for mac in macs {
+            let plain = mac.replacingOccurrences(of: ":", with: "")
+            defaults?.removeObject(forKey: optimisticVolumeAtKey(plain))
+        }
+    }
+
     /// Pose le niveau optimiste d'une enceinte (MAC déjà sans deux-points).
     ///
     /// Il est posé **avant** l'écriture réseau : la session est rafraîchie en
@@ -578,6 +591,14 @@ enum VolumeCommand {
 /// un « − » descendait de ~6 dB (r/16 − (1 − r) × niveau, dans les deux sens).
 /// Un doigt sur la barre avance donc, lui aussi, cran par cran.
 ///
+/// Un rapport ne s'oublie pas sur un push. Le 29/10 à 15:11:52.104, un push
+/// tardif a fait perdre au rendu son écart de confirmation (0,321 → 0,3205) :
+/// iOS ne l'a pas vu — l'appui suivant part encore de 0,321, à 0,431 —, le
+/// modèle l'a adopté et suivait 1. Le « + » suivant s'est relu « − » au sens
+/// seul, et chaque premier « + » après une pause aurait fait de même. Un
+/// écart de cet ordre n'est donc pas un changement (`unnoticed`), et le
+/// dernier rapport reconnu reste un repère (`anchor`).
+///
 /// Pur, pour être testé avec les chiffres relevés. Rangé dans le conteneur
 /// partagé : l'extension change de processus sans arrêt, iOS garde son état.
 struct SystemVolumeModel: Codable, Equatable {
@@ -598,6 +619,13 @@ struct SystemVolumeModel: Codable, Equatable {
     var lastPosed: Double?
     var lastCommit: Double?
     var lastAt: TimeInterval = 0
+    /// Le dernier rapport qu'un appui reconnu a montré. Un push ne l'efface
+    /// pas : iOS ne change de rapport qu'en adoptant un niveau, et s'il n'a pas
+    /// adopté ce que le modèle a adopté, c'est encore le sien.
+    ///
+    /// Optionnel : un état rangé avant lui se relit tel quel au lieu de
+    /// repartir de zéro.
+    var anchor: Double?
 
     /// Le cran d'un bouton physique sur une destination externe.
     static let step = 1.0 / 16
@@ -619,6 +647,12 @@ struct SystemVolumeModel: Codable, Equatable {
 
     /// En dessous, un G engagé est nul : iOS y garde ses rapports.
     static let silent = 0.0001
+
+    /// Un écart de rendu qu'iOS ne remarque pas : à 15:11:52.104 le rendu est
+    /// passé de 0,321 à 0,3205 hors commande, et l'appui suivant partait
+    /// encore de 0,321 (0,16529 = 0,43101 × (0,321 + 1/16)). Celui de
+    /// confirmation est 0,0005 ; Milō confirme notre demande à 0,001 près.
+    static let unnoticed = MiloAPIClient.confirmationTolerance
 
     /// Ce qu'un rappel voulait dire : un cran de Milō dans ce sens, rien
     /// d'autre.
@@ -643,7 +677,7 @@ struct SystemVolumeModel: Codable, Equatable {
     mutating func observe(_ level: Double, session id: String, duringCommand: Bool,
                           now: TimeInterval) {
         if session != id { self = SystemVolumeModel(session: id) }
-        let changed = lastSeen.map { abs($0 - level) > 0.000_001 } ?? true
+        let changed = lastSeen.map { abs($0 - level) > Self.unnoticed } ?? true
         if changed {
             previousSeen = lastSeen
             lastSeen = level
@@ -662,6 +696,11 @@ struct SystemVolumeModel: Codable, Equatable {
     /// Relit un rappel : `posed` est ce qu'iOS demande, `shown` ce que nous lui
     /// avions rendu, sans l'écart de confirmation.
     mutating func interpret(posed: Double, shown: Double, now: TimeInterval) -> Reading {
+        // La carte affiche le rendu, écart compris, et iOS engage à partir de
+        // lui : à cet écart près, c'est le dernier rendu vu. En bas de course,
+        // 0,0005 de trop suffisait à écarter le bon « − » (rapport > 1,04).
+        let shown = lastSeen.flatMap { abs($0 - shown) <= Self.unnoticed ? $0 : nil } ?? shown
+
         // Ce que la carte pouvait afficher quand l'appui est parti : notre
         // rendu ; celui d'avant s'il vient de changer ; et, juste après un
         // appui, ce qu'iOS a posé ou engagé.
@@ -671,19 +710,24 @@ struct SystemVolumeModel: Codable, Equatable {
         if recent { displays += [lastCommit, lastPosed].compactMap { $0 } }
 
         // Rien de reconnu — un rapport qui a bougé sans qu'on le voie, ou un
-        // doigt sur la barre : le sens seul. Pour un même rapport, iOS pose plus
-        // haut sur un « + » et plus bas sur un « − », que ce soit par rapport à
-        // son dernier appui ou à ce qu'on lui montrait. Et l'appui de ce sens
-        // le plus proche du rapport suivi donne le nouveau : sans lui, un
-        // rapport faux le resterait, et chaque appui ne serait relu qu'au sens.
+        // doigt sur la barre : le sens seul. Quand un seul sens explique
+        // `posed` sous un rapport d'au plus 1, c'est lui. Sinon, pour un même
+        // rapport, iOS pose plus haut sur un « + » et plus bas sur un « − »,
+        // que ce soit par rapport à son dernier appui ou à ce qu'on lui
+        // montrait. Et l'appui de ce sens le plus proche du rapport suivi donne
+        // le nouveau : sans lui, un rapport faux le resterait, et chaque appui
+        // ne serait relu qu'au sens.
         let candidates = Self.candidates(posed, among: displays)
         let reading = recognize(candidates) ?? {
-            let up = posed > (recent ? lastPosed : nil) ?? shown * ratio
+            let directions = Set(candidates.map(\.up))
+            let up = directions.count == 1 ? directions.contains(true)
+                : posed > (recent ? lastPosed : nil) ?? shown * ratio
             var guess = candidates.filter { $0.up == up }
                 .min { error($0, ratio) < error($1, ratio) } ?? Reading(up: up)
             guess.guessed = true
             return guess
         }()
+        if !reading.guessed, let ratio = reading.ratio { anchor = ratio }
 
         // iOS vient d'engager `commit` : c'est son plafond, et ce qu'il a posé sa
         // référence. Sauf à zéro, où il garde ses rapports.
@@ -692,7 +736,9 @@ struct SystemVolumeModel: Codable, Equatable {
             reference = posed
         }
         lastPosed = posed
-        lastCommit = reading.commit
+        // Un G deviné n'est pas une carte : relu comme tel, il entraînait le
+        // « − » suivant vers « + » (cascade du 29/10, simulée).
+        lastCommit = reading.guessed ? nil : reading.commit
         lastAt = now
         return reading
     }
@@ -712,21 +758,31 @@ struct SystemVolumeModel: Codable, Equatable {
         }
     }
 
-    /// L'appui qui s'accorde au rapport suivi — ou à 1, si iOS est reparti de
-    /// zéro sans qu'on le voie (point d'accès recréé).
+    /// L'appui qui s'accorde au rapport suivi, au dernier reconnu — qu'un push
+    /// a pu faire oublier au premier —, ou à 1, si iOS est reparti de zéro sans
+    /// qu'on le voie (point d'accès recréé).
     ///
     /// Le critère est le **rapport**, pas le niveau : à rapport faux, l'écart
     /// en niveau grandit avec le niveau, et une tolérance en niveau laissait
     /// passer un rapport de 1 pour 0,909 en bas de course puis le perdait plus
     /// haut (17/10, 00:50:25).
     private func recognize(_ candidates: [Reading]) -> Reading? {
-        for prior in ratio < 1 ? [ratio, 1] : [1] {
+        for prior in [ratio, remembered, 1].compactMap({ $0 }) {
             if let best = candidates.min(by: { error($0, prior) < error($1, prior) }),
                error(best, prior) <= Self.tolerance {
                 return best
             }
         }
         return nil
+    }
+
+    /// `anchor`, ou pour un état rangé avant lui, le rapport de son dernier
+    /// appui reconnu.
+    private var remembered: Double? {
+        if let anchor { return anchor }
+        guard let lastPosed, let lastCommit, lastPosed > Self.silent, lastCommit > Self.silent
+        else { return nil }
+        return min(lastPosed / lastCommit, 1)
     }
 
     /// L'écart relatif d'un appui au rapport `prior` ; nul pour un appui engagé
