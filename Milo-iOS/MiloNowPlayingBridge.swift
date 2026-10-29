@@ -250,6 +250,7 @@ enum MiloNowPlayingBridge {
         // pousser ses `update` à la session, la déclare inadressable, et en
         // ouvre une rivale que le système n'affiche pas.
         await MiloAPIClient.drainPendingSessionToken()
+        MiloPushToStart.retryIfNeeded()
 
         // Ne rien changer si Milō est injoignable : une coupure réseau n'est
         // pas une fin de lecture, et effacer la carte à chaque paquet perdu la
