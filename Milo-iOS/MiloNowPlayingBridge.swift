@@ -473,7 +473,18 @@ enum MiloNowPlayingBridge {
         // `buildAttributes` — pochette, volume, multiroom. Un `start` de Milō
         // arrivé pendant ce temps a déjà ouvert sa session : ouvrir la nôtre
         // referait les deux sessions du 19/09. La passe suivante l'adoptera.
-        let current = (try? await RemoteMediaSession<MiloSessionAttributes>.sessions()) ?? []
+        // Une énumération qui échoue ne dit pas « aucune session » : elle ne
+        // dit rien, et ouvrir sur ce silence pouvait refaire les deux sessions.
+        let current: [RemoteMediaSession<MiloSessionAttributes>]
+        do {
+            current = try await RemoteMediaSession<MiloSessionAttributes>.sessions()
+        } catch {
+            // Compté comme un essai : sans quoi chaque passe repayait la
+            // construction des attributs pour abandonner au même endroit.
+            lastStartAttempt = Date()
+            note("ouverture abandonnée : sessions illisibles (\(error))")
+            return
+        }
         guard current.isEmpty else {
             systemHoldsAny = true
             note("ouverture abandonnée : une session est née entre-temps")
@@ -527,7 +538,18 @@ enum MiloNowPlayingBridge {
     /// `MiloSourceCard`).
     ///
     private static func reconcileSession() async {
-        let all = (try? await RemoteMediaSession<MiloSessionAttributes>.sessions()) ?? []
+        // Un échec n'est pas une liste vide. Lu comme tel, il disait à Milō
+        // que le téléphone ne tenait plus rien : Milō retirait le token de la
+        // session affichée, et l'app ou un `start` en ouvrait une rivale. On
+        // ne touche donc à rien pour cette passe, et on interdit l'ouverture.
+        let all: [RemoteMediaSession<MiloSessionAttributes>]
+        do {
+            all = try await RemoteMediaSession<MiloSessionAttributes>.sessions()
+        } catch {
+            systemHoldsAny = true
+            note("sessions illisibles : \(error)")
+            return
+        }
         systemHoldsAny = !all.isEmpty
 
         // Dit à Milō ce que le téléphone tient réellement, **avant** de filtrer.
