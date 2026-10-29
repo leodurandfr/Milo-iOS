@@ -28,14 +28,25 @@ enum MiloScopedHTTP {
     }
 
     enum Failure: Error, CustomStringConvertible {
-        case timedOut(String)
-        case connection(NWError)
+        case timedOut(String, sent: Bool)
+        case connection(NWError, sent: Bool)
         case malformed
+
+        /// La requête est-elle partie vers Milō ? Une réponse illisible prouve
+        /// qu'elle est arrivée.
+        var sent: Bool {
+            switch self {
+            case .timedOut(_, let sent), .connection(_, let sent): return sent
+            case .malformed: return true
+            }
+        }
 
         var description: String {
             switch self {
-            case .timedOut(let state): return "délai dépassé (\(state))"
-            case .connection(let error): return "\(error)"
+            case .timedOut(let state, let sent):
+                return "délai dépassé (\(state)\(sent ? ", requête envoyée" : ""))"
+            case .connection(let error, let sent):
+                return "\(error)\(sent ? " (requête envoyée)" : "")"
             case .malformed: return "réponse illisible"
             }
         }
@@ -52,6 +63,12 @@ enum MiloScopedHTTP {
     ///
     /// Le délai de la requête est partagé entre les deux essais : l'appelant
     /// l'a réglé sur le budget de son rappel, et on ne le dépasse pas.
+    ///
+    /// Une requête qui n'est pas un GET ne passe au second hôte que si elle
+    /// n'est jamais partie vers le premier. Les deux hôtes sont le même Pi :
+    /// un `next` envoyé à l'IP puis rejoué sur `milo.local` parce que la
+    /// réponse tardait faisait sauter deux stations pour un seul appui. Rejouer
+    /// ou non, c'est à l'appelant d'en décider (`retryable` de `sendControl`).
     static func perform(_ request: URLRequest) async throws -> (Data, URLResponse) {
         guard let url = request.url,
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
@@ -93,6 +110,8 @@ enum MiloScopedHTTP {
                     """)
                 lastError = error
                 if Task.isCancelled { throw URLError(.cancelled) }
+                if request.httpMethod ?? "GET" != "GET",
+                   (error as? Failure)?.sent ?? true { break }
             }
         }
         // Rendu en erreur d'URL : les appelants trient sur `NSURLErrorDomain`
@@ -138,7 +157,7 @@ enum MiloScopedHTTP {
                     if complete || Self.isComplete(received) {
                         finish(.success(received))
                     } else if let error {
-                        finish(.failure(Failure.connection(error)))
+                        finish(.failure(Failure.connection(error, sent: exchange.sent)))
                     } else {
                         receive()
                     }
@@ -149,12 +168,13 @@ enum MiloScopedHTTP {
                 exchange.note(state)
                 switch state {
                 case .ready:
+                    exchange.markSent()
                     connection.send(content: payload, completion: .contentProcessed { error in
-                        if let error { finish(.failure(Failure.connection(error))) }
+                        if let error { finish(.failure(Failure.connection(error, sent: exchange.sent))) }
                     })
                     receive()
                 case .failed(let error):
-                    finish(.failure(Failure.connection(error)))
+                    finish(.failure(Failure.connection(error, sent: exchange.sent)))
                 default:
                     // `waiting` compris : un chemin refusé attend, et c'est le
                     // délai qui tranche — l'état noté dit alors pourquoi.
@@ -162,7 +182,7 @@ enum MiloScopedHTTP {
                 }
             }
             queue.asyncAfter(deadline: .now() + timeout) {
-                finish(.failure(Failure.timedOut(exchange.lastState)))
+                finish(.failure(Failure.timedOut(exchange.lastState, sent: exchange.sent)))
             }
             connection.start(queue: queue)
         }
@@ -177,8 +197,12 @@ enum MiloScopedHTTP {
         private var finished = false
         private var received = Data()
         private var state = "setup"
+        private var requestSent = false
 
         var lastState: String { lock.withLock { state } }
+        var sent: Bool { lock.withLock { requestSent } }
+
+        func markSent() { lock.withLock { requestSent = true } }
 
         func note(_ state: NWConnection.State) { lock.withLock { self.state = "\(state)" } }
 
