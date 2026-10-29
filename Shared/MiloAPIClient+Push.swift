@@ -71,12 +71,27 @@ extension MiloAPIClient {
     /// ne marche pas » se manifeste, donc on lit la valeur réelle plutôt que de
     /// la déduire d'un `#if DEBUG` qui mentirait sur un build TestFlight.
     ///
-    /// Retourne `nil` si le profil est illisible (simulateur, notamment) : on
-    /// n'enregistre alors rien du tout. Milō refuse un enregistrement sans
-    /// environnement (422), et il a raison — une valeur inventée coûterait plus
-    /// cher qu'une absence.
+    /// Un build sans profil embarqué sur un appareil, c'est un build App Store
+    /// ou TestFlight : Apple retire `embedded.mobileprovision` à la signature de
+    /// distribution, et les deux visent APNs de production. Ce n'est pas une
+    /// supposition mais la seule possibilité — un build qui tourne sur un
+    /// appareil sans ce fichier n'a pas pu être signé autrement. Lire `nil`
+    /// ici, c'était un widget qui ne s'enregistrerait jamais une fois distribué.
+    ///
+    /// Retourne `nil` si le profil est illisible, et sur le simulateur, qui n'a
+    /// pas d'APNs de production : on n'enregistre alors rien du tout. Milō
+    /// refuse un enregistrement sans environnement (422), et il a raison — une
+    /// valeur inventée coûterait plus cher qu'une absence.
     static func apsEnvironment() -> String? {
-        guard let data = embeddedMobileProvision() else { return nil }
+        guard let data = embeddedMobileProvision() else {
+            #if targetEnvironment(simulator)
+            return nil
+            #else
+            // Absent, et non illisible : un profil présent qu'on n'arrive pas
+            // à lire peut être de développement.
+            return hasEmbeddedMobileProvision() ? nil : "production"
+            #endif
+        }
 
         // Le fichier est un conteneur CMS signé ; le plist est en clair à
         // l'intérieur. On le découpe aux bornes plutôt que de dépendre de
@@ -111,16 +126,21 @@ extension MiloAPIClient {
     /// build local n'en embarque pas ; on remonte alors au bundle de l'app, qui
     /// est signé avec un profil de même environnement.
     private static func embeddedMobileProvision() -> Data? {
-        if let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
-           let data = try? Data(contentsOf: url) {
-            return data
-        }
+        provisionCandidates.lazy.compactMap { try? Data(contentsOf: $0) }.first
+    }
+
+    private static func hasEmbeddedMobileProvision() -> Bool {
+        provisionCandidates.contains { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private static var provisionCandidates: [URL] {
         // `.appex` vit dans `<App>.app/PlugIns/` : deux crans au-dessus.
         let containing = Bundle.main.bundleURL
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("embedded.mobileprovision")
-        return try? Data(contentsOf: containing)
+        let own = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision")
+        return [own, containing].compactMap { $0 }
     }
 
     /// Identifiant stable de cette installation, minté une fois puis conservé.
