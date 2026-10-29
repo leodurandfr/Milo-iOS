@@ -14,12 +14,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Le token du widget est émis par WidgetKit, mais il est lisible d'ici :
-        // l'app est le seul des deux processus dont on sait qu'il vient de
-        // tourner. L'extension, elle, n'est réveillée qu'au bon vouloir du
-        // système, et attendre son prochain passage retarderait d'autant
-        // l'enregistrement chez Milō. L'appel est idempotent et ne coûte rien
-        // une fois le token confirmé.
         // Inscrit l'appareil auprès d'APNs. Sans cet appel, aucun topic de ce
         // bundle n'existe côté Apple, et WidgetKit n'a pas de quoi frapper son
         // propre token — ce qui se voit comme une absence totale, sans erreur.
@@ -28,7 +22,21 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // besoin ici puisque le push widget ne notifie personne.
         application.registerForRemoteNotifications()
 
+        // Le token du widget est émis par WidgetKit, mais il est lisible d'ici :
+        // l'app est le seul des deux processus dont on sait qu'il vient de
+        // tourner. L'extension, elle, n'est réveillée qu'au bon vouloir du
+        // système, et attendre son prochain passage retarderait d'autant
+        // l'enregistrement chez Milō.
+        //
+        // La consigne « déjà enregistré » est effacée d'abord, comme celle du
+        // token de session dans `MiloPushToStart.begin()`. Milō peut perdre le
+        // token sans que le téléphone le sache — registre effacé, ou purge
+        // après un refus d'APNs — et la consigne, qui ne tombe d'elle-même
+        // qu'au redémarrage du téléphone ou à un nouveau token, faisait taire
+        // le widget jusque-là. Coût : un POST par lancement.
         if #available(iOS 26.0, *) {
+            UserDefaults(suiteName: MiloAPIClient.appGroupID)?
+                .removeObject(forKey: MiloAPIClient.registeredWidgetTokenKey)
             Task { await MiloAPIClient.reconcileWidgetPushToken() }
         }
 
