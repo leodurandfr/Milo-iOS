@@ -184,6 +184,22 @@ extension MiloAPIClient {
             .set("\(sessionID)/\(hex)", forKey: pendingSessionTokenKey)
     }
 
+    /// Retire le couple déposé, **s'il est toujours celui-là**.
+    ///
+    /// Appelé par l'extension quand son propre envoi a abouti, et par l'app
+    /// après le sien. Les deux processus écrivent la même clé : effacer sans
+    /// comparer, c'était perdre un token plus récent déposé pendant l'attente
+    /// réseau. Ne pas effacer du tout, c'était laisser l'app réenregistrer, au
+    /// retour au premier plan, le token d'une session finie depuis longtemps.
+    /// `UserDefaults` n'offre pas de comparaison atomique : la fenêtre qui
+    /// reste se compte entre une lecture et une écriture, plus pendant un POST.
+    static func clearPendingSessionToken(ifStill raw: String) {
+        let defaults = UserDefaults(suiteName: appGroupID)
+        if defaults?.string(forKey: pendingSessionTokenKey) == raw {
+            defaults?.removeObject(forKey: pendingSessionTokenKey)
+        }
+    }
+
     /// Ce que l'app tient vraiment, dit à Milō pour qu'il puisse lâcher le reste.
     ///
     /// Un token de session survit à sa session, et **rien du côté de Milō ne
@@ -260,7 +276,7 @@ extension MiloAPIClient {
 
         if case .registered = await registerPushToken(
             token, kind: .session, sessionID: sessionID) {
-            defaults?.removeObject(forKey: pendingSessionTokenKey)
+            clearPendingSessionToken(ifStill: raw)
         }
     }
 

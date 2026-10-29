@@ -931,6 +931,9 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         switch outcome {
         case .registered:
             lastRegistered = stamp(sessionID, token)
+            // La paire est celle que `notePendingSessionToken` a déposée :
+            // l'app n'a plus à la reposter.
+            MiloAPIClient.clearPendingSessionToken(ifStill: stamp(sessionID, token))
             miloLog.info("""
                 token de session déposé (\(occasion, privacy: .public)) \
                 \(sessionID, privacy: .public)
