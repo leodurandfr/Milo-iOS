@@ -154,6 +154,8 @@ enum MiloScopedHTTP {
             @Sendable func receive() {
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { chunk, _, complete, error in
                     let received = exchange.append(chunk)
+                    // Une fermeture rend ce qu'on a, erreur comprise : c'est
+                    // `parse` qui juge si le corps est entier.
                     if complete || Self.isComplete(received) {
                         finish(.success(received))
                     } else if let error {
@@ -226,17 +228,26 @@ enum MiloScopedHTTP {
     /// la fermeture, que `Connection: close` garantit.
     private static func isComplete(_ data: Data) -> Bool {
         guard let split = data.range(of: Data("\r\n\r\n".utf8)),
-              let head = String(data: data[..<split.lowerBound], encoding: .utf8)
+              let head = String(data: data[..<split.lowerBound], encoding: .utf8),
+              let length = contentLength(head)
         else { return false }
-        for line in head.split(separator: "\r\n") {
+        return data.count - split.upperBound >= length
+    }
+
+    /// La valeur d'un champ d'en-tête, nom comparé sans casse.
+    private static func field(_ name: String, in head: String) -> String? {
+        for line in head.split(separator: "\r\n").dropFirst() {
             let parts = line.split(separator: ":", maxSplits: 1)
             if parts.count == 2,
-               parts[0].trimmingCharacters(in: .whitespaces).lowercased() == "content-length",
-               let length = Int(parts[1].trimmingCharacters(in: .whitespaces)) {
-                return data.count - split.upperBound >= length
+               parts[0].trimmingCharacters(in: .whitespaces).lowercased() == name {
+                return parts[1].trimmingCharacters(in: .whitespaces)
             }
         }
-        return false
+        return nil
+    }
+
+    private static func contentLength(_ head: String) -> Int? {
+        field("content-length", in: head).flatMap { Int($0) }.flatMap { $0 >= 0 ? $0 : nil }
     }
 
     private static func parse(_ data: Data) throws -> Response {
@@ -247,8 +258,19 @@ enum MiloScopedHTTP {
         let fields = statusLine.split(separator: " ")
         guard fields.count >= 2, let status = Int(fields[1]) else { throw Failure.malformed }
         let body = Data(data[split.upperBound...])
-        let chunked = head.lowercased().contains("transfer-encoding: chunked")
-        return Response(status: status, body: chunked ? try dechunk(body) : body)
+        let chunked = field("transfer-encoding", in: head)?.lowercased()
+            .split(separator: ",").contains { $0.trimmingCharacters(in: .whitespaces) == "chunked" }
+            ?? false
+        if chunked { return Response(status: status, body: try dechunk(body)) }
+        // Un corps plus court qu'annoncé : la connexion a été coupée en
+        // route. Le rendre comme un succès, c'était une pochette tronquée
+        // écrite au cache pour de bon — ses premiers octets passent le
+        // contrôle de format.
+        if let length = contentLength(head) {
+            guard body.count >= length else { throw Failure.malformed }
+            return Response(status: status, body: body.prefix(length))
+        }
+        return Response(status: status, body: body)
     }
 
     /// Un corps que nginx relaie en morceaux, rendu d'un seul tenant.
@@ -268,6 +290,7 @@ enum MiloScopedHTTP {
             out.append(data[start..<end])
             index = data.index(end, offsetBy: 2, limitedBy: data.endIndex) ?? data.endIndex
         }
-        return out
+        // Sans le morceau de taille zéro, le corps a été coupé en route.
+        throw Failure.malformed
     }
 }
