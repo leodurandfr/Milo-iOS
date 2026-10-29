@@ -15,6 +15,17 @@ import XCTest
 /// dans la sortie, et le Mac les confronte à `/api/volume/state`.
 final class VolumeButtonsUITests: XCTestCase {
 
+    /// Sauté sauf demande explicite. Le schéma partagé lance cette cible à
+    /// chaque Cmd+U : sur l'iPhone, une cinquantaine d'appuis partaient alors
+    /// vers les vraies enceintes dès que l'écran était verrouillé. Pour un
+    /// passage du banc : `TEST_RUNNER_VOLBENCH=1 xcodebuild test …` —
+    /// xcodebuild retire le préfixe et transmet la variable au processus de
+    /// test.
+    override func setUpWithError() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["VOLBENCH"] == "1",
+                          "banc des boutons de volume : VOLBENCH=1 pour le lancer")
+    }
+
     @MainActor
     func testVolumeButtonsReachMilo() throws {
         XCUIDevice.shared.press(.home)
