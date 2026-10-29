@@ -447,6 +447,12 @@ extension MiloAPIClient {
         return confirmed
     }
 
+    /// Quand la valeur optimiste de cette enceinte a été posée, s'il y en a une.
+    static func optimisticAt(mac: String) -> TimeInterval? {
+        let plain = mac.replacingOccurrences(of: ":", with: "")
+        return UserDefaults(suiteName: appGroupID)?.object(forKey: optimisticVolumeAtKey(plain)) as? Double
+    }
+
     /// Oublie ce qu'on avait promis pour ces enceintes.
     ///
     /// À n'appeler que quand l'écriture a échoué. Sans cela, l'affichage tient
@@ -454,12 +460,6 @@ extension MiloAPIClient {
     /// la lecture du niveau appliqué existe précisément pour éviter, et qui ne
     /// servait à rien tant que le cas « pas de réponse du tout » n'était pas
     /// traité.
-    /// Quand la valeur optimiste de cette enceinte a été posée, s'il y en a une.
-    static func optimisticAt(mac: String) -> TimeInterval? {
-        let plain = mac.replacingOccurrences(of: ":", with: "")
-        return UserDefaults(suiteName: appGroupID)?.object(forKey: optimisticVolumeAtKey(plain)) as? Double
-    }
-
     static func forgetOptimistic(macs: [String]) {
         let defaults = UserDefaults(suiteName: appGroupID)
         for mac in macs {
@@ -798,8 +798,8 @@ struct SystemVolumeModel: Codable, Equatable {
             level = min(max(from + (press.up ? Self.step : -Self.step), 0), 1)
         }
         lastAt = now
-        return Command(expected: expected, level: level, press: press, learned: learned,
-                       ratio: learned ? press?.ratio ?? self.ratio : self.ratio)
+        // Un appui reconnu vient de poser plafond et référence : `ratio` est déjà le sien.
+        return Command(expected: expected, level: level, press: press, learned: learned, ratio: ratio)
     }
 
     /// Le retour du rappel, écriture faite : c'est de lui que se mesure le
