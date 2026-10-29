@@ -824,9 +824,10 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         let defaults = UserDefaults(suiteName: MiloAPIClient.appGroupID)
         var lines = defaults?.stringArray(forKey: "milo_ext_trace") ?? []
         lines.append("\(traceClock.string(from: Date())) \(message)")
-        // Soixante plutôt que vingt : un glissement de quelques secondes sur
-        // trois enceintes dépassait la fenêtre avant même d'être relu.
-        defaults?.set(Array(lines.suffix(60)), forKey: "milo_ext_trace")
+        // Six cents : le 29/10, trois minutes d'appuis à l'écran verrouillé
+        // (17:00–17:03, ~250 crans au journal de nginx) dépassaient soixante
+        // lignes, et l'appui inversé qu'on cherchait n'était plus relisible.
+        defaults?.set(Array(lines.suffix(600)), forKey: "milo_ext_trace")
     }
 
     /// N'écrit que si la base a bougé : `devices` est relu à chaque changement

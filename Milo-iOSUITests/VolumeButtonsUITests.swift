@@ -38,6 +38,54 @@ final class VolumeButtonsUITests: XCTestCase {
         sleep(3)
     }
 
+    /// Le premier appui après une pause : le push de Milō arrive plus d'une
+    /// seconde après le cran, et c'est lui qui faisait perdre au modèle son
+    /// rapport (29/10, 15:11:52 : un « + » relu « − »). Dix appuis, pour que
+    /// la trace de l'extension (60 lignes) les garde tous.
+    @MainActor
+    func testFirstPressAfterAPause() throws {
+        XCUIDevice.shared.press(.home)
+        print("VOLBENCH WAITING_LOCK \(Date().timeIntervalSince1970)")
+        sleep(20)
+
+        for button: XCUIDevice.Button in [.volumeUp, .volumeDown, .volumeUp, .volumeUp,
+                                          .volumeDown, .volumeDown] {
+            press(button, pause: 4)
+        }
+        press(.volumeUp, pause: 0.4)
+        press(.volumeUp, pause: 4)
+        press(.volumeDown, pause: 0.4)
+        press(.volumeDown, pause: 4)
+    }
+
+    /// Le volume a changé ailleurs pendant que l'iPhone était déverrouillé :
+    /// le premier appui verrouillé part-il de notre rendu, ou de ce que la
+    /// carte montrait au dernier verrouillage (29/10, 17:06:59 : un « − »
+    /// engagé depuis 0,9615 quand Milō était à 0,2937) ?
+    @MainActor
+    func testPressesAfterAnExternalChange() throws {
+        XCUIDevice.shared.press(.home)
+        print("VOLBENCH WAITING_LOCK \(Date().timeIntervalSince1970)")
+        sleep(25)
+
+        for button: XCUIDevice.Button in [.volumeUp, .volumeUp, .volumeDown, .volumeDown] {
+            press(button, pause: 4)
+        }
+    }
+
+    /// Le même, volume baissé ailleurs : le plafond d'iOS reste en haut, et
+    /// c'est un « − » qui part le premier.
+    @MainActor
+    func testPressesAfterAnExternalDecrease() throws {
+        XCUIDevice.shared.press(.home)
+        print("VOLBENCH WAITING_LOCK \(Date().timeIntervalSince1970)")
+        sleep(25)
+
+        for button: XCUIDevice.Button in [.volumeDown, .volumeDown, .volumeUp, .volumeUp] {
+            press(button, pause: 4)
+        }
+    }
+
     private func press(_ button: XCUIDevice.Button, pause: TimeInterval = 1.5) {
         let name = button == .volumeUp ? "UP" : "DOWN"
         print("VOLBENCH PRESS \(name) \(Date().timeIntervalSince1970)")
