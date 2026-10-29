@@ -660,8 +660,8 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     /// sciemment.
     ///
     /// Le niveau arrive normalisé 0…1 de Milō, et l'extension ne convertit rien
-    /// en décibels. Un rappel ne repart jamais en niveau : c'est un cran de
-    /// Milō, dont `SystemVolumeModel` relit le sens.
+    /// en décibels. Un rappel repart au niveau qu'iOS attend de l'appareil,
+    /// que `SystemVolumeModel` calcule.
     var devices: [MediaDevice] {
         miloLog.notice("devices lu : \(self.attributes.devices.count, privacy: .public) enceinte(s)")
         _ = volumeEcho
@@ -716,10 +716,10 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                     // échoue, et ce sont deux causes opposées.
                     miloLog.notice("RAPPEL VOLUME \(system.id, privacy: .public) -> \(newLevel, privacy: .public)")
                     Self.trace("onChange \(system.id) -> \(newLevel)")
-                    let sent = await MiloAPIClient.applyVolume(to: newLevel, shown: base)
-                    // Seul le rappel dont l'envoi est allé au bout fait relire :
-                    // un rappel absorbé par le suivant rendrait en plein geste
-                    // un niveau déjà dépassé.
+                    let sent = await MiloAPIClient.applyVolume(to: newLevel, shown: base,
+                                                               reported: system.volume)
+                    // Seul un rappel dont l'écrivain a écrit fait relire : un
+                    // doigt immobile n'a rien de neuf à rendre.
                     guard sent, let self else { return }
                     await MainActor.run { self.volumeEcho &+= 1 }
                 }

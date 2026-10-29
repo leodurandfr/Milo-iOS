@@ -492,9 +492,9 @@ struct TrackIDTests {
 }
 
 /// La carte à un seul appareil, le système Milō : chaque séquence est relevée au
-/// banc le 12/10/2026 (boutons physiques, écran verrouillé, journaux de
-/// MediaRemoteUI et de l'extension). Un rappel ne rend qu'un sens : c'est un
-/// cran de Milō, jamais un niveau.
+/// banc (boutons physiques, écran verrouillé, journaux de MediaRemoteUI et de
+/// l'extension). Un rappel écrit le niveau qu'iOS attend : G pour un appui, le
+/// doigt pour la barre.
 struct SystemVolumeModelTests {
 
     func close(_ a: Double, _ b: Double, _ tolerance: Double = 0.0005) -> Bool {
@@ -509,114 +509,273 @@ struct SystemVolumeModelTests {
         }
     }
 
+    /// Les niveaux qu'un doigt sur la barre fait écrire, un rappel toutes les
+    /// 65 ms.
+    func slide(_ model: inout SystemVolumeModel, _ posed: [Double], shown: Double,
+               from start: TimeInterval = 100, every interval: TimeInterval = 0.065) -> [Double] {
+        posed.enumerated().map { i, value in
+            let at = start + interval * Double(i)
+            let level = model.obey(posed: value, shown: shown, now: at).level
+            // iOS envoie le suivant ~11 ms après ce retour.
+            model.returned(at: at + interval - 0.011)
+            return level
+        }
+    }
+
+    @Test("iOS sain : un appui écrit exactement affiché ± 1/16")
+    func healthy() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.3205)
+        let plus = model.obey(posed: 0.383, shown: 0.3205, now: 100)
+        #expect(plus.press?.up == true)
+        #expect(close(plus.level, 0.383))
+        let minus = model.obey(posed: 0.3205, shown: 0.383, now: 102)
+        #expect(minus.press?.up == false)
+        #expect(close(minus.level, 0.3205))
+        #expect(close(model.ratio, 1))
+    }
+
+    /// Ce qui manquait : à rapport 1, la barre va d'un bout à l'autre, et le
+    /// rapport reste à 1 après le geste.
+    @Test("À rapport 1, la barre atteint le haut et le bas")
+    func slideEndToEnd() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.5)
+        let up = slide(&model, [0.62, 0.8, 0.95, 1, 1], shown: 0.5)
+        #expect(up.last == 1)
+        #expect(zip(up, up.dropFirst()).allSatisfy { $0 <= $1 })
+        let down = slide(&model, [0.7, 0.3, 0.05, 0], shown: 1, from: 110)
+        #expect(down.last == 0)
+        #expect(close(model.ratio, 1))
+    }
+
+    /// 29/10, 17:44:00.402–00.859 : le doigt part de 0,5186 et monte jusqu'en
+    /// haut, sous le rapport qu'iOS tenait depuis l'après-midi — 0,61807793,
+    /// ce qu'il pose doigt en haut. Posé ÷ rapport mène Milō en haut.
+    @Test("Sous un rapport connu, un glissement jusqu'en haut met Milō au maximum")
+    func slideToTheTop() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.5186 / 0.61807793, 0.5186)
+        let levels = slide(&model, [0.32321206, 0.47091976, 0.5490758, 0.5612653,
+                                    0.5820591, 0.60428697, 0.61807793, 0.61807793], shown: 0.5186)
+        #expect(close(levels[0], 0.5229, 0.001))
+        #expect(zip(levels, levels.dropFirst()).allSatisfy { $0 <= $1 })
+        #expect(levels.last.map { close($0, 1, 0.000_1) } == true)
+        #expect(close(model.ratio, 0.61807793, 0.000_1))
+    }
+
+    /// Le doigt saisit le curseur sous un rapport de 0,62, puis monte : le
+    /// premier rappel est le curseur même, pas un appui.
+    @Test("Saisir le curseur sous un rapport connu ne fait rien sauter")
+    func grabTheThumb() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.5 / 0.62, 0.5)
+        let levels = slide(&model, [0.5, 0.6, 0.8, 1].map { 0.62 * $0 }, shown: 0.5)
+        #expect(close(levels[0], 0.5, 0.001))
+        #expect(close(levels.last ?? 0, 1, 0.001))
+        #expect(close(model.ratio, 0.62, 0.001))
+    }
+
+    /// Revue du 29/10 : baissé ailleurs de 0,6 à 0,3 (rapport 0,5), toucher à
+    /// 0,475 puis jusqu'en haut. Sous 1, le premier rappel se lit « − » ; il
+    /// fait son pas, mais n'apprend pas 1 — le glissement plafonnait à 0,5.
+    @Test("Un toucher lu en appui sous un autre rapport ne plafonne pas la barre")
+    func touchReadAsAPressUnderAnotherRatio() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.6, 0.3)
+        let first = model.obey(posed: 0.5 * 0.475, shown: 0.3, now: 100)
+        #expect(first.press?.up == false)
+        #expect(!first.learned)
+        #expect(first.level >= 0.3 - SystemVolumeModel.step - 0.000_1)
+        model.returned(at: 100.054)
+        let levels = slide(&model, [0.6, 0.8, 1, 1].map { 0.5 * $0 }, shown: first.level,
+                           from: 100.065)
+        #expect(close(levels.last ?? 0, 1, 0.001))
+        #expect(close(model.ratio, 0.5, 0.001))
+    }
+
+    /// Une écriture lente (Pi occupé, Wi-Fi en veille) espace les rappels du
+    /// doigt au-delà de `dragGap` : c'est le retour du précédent qui compte.
+    @Test("Un glissement aux écritures lentes reste un glissement")
+    func slowWritesKeepTheSlide() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.5 / 0.62, 0.5)
+        let levels = slide(&model, [0.5, 0.55, 0.6, 0.7, 0.8, 0.9, 1, 1].map { 0.62 * $0 },
+                           shown: 0.5, every: 0.13)
+        #expect(zip(levels, levels.dropFirst()).allSatisfy { $0 <= $1 + 0.000_1 })
+        #expect(close(levels.last ?? 0, 1, 0.001))
+        #expect(close(model.ratio, 0.62, 0.001))
+    }
+
+    /// 17:37:17.036–17.102 : doigt tenu au milieu, iOS rappelle à quelques
+    /// millièmes près. Chaque rappel partait en cran et Milō montait au
+    /// maximum ; le niveau reste maintenant sous le doigt.
+    @Test("Un doigt immobile garde son niveau")
+    func heldFingerKeepsItsLevel() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.634)
+        let levels = slide(&model, [0.5708, 0.5715832, 0.5720694, 0.5720694, 0.5719, 0.5722],
+                           shown: 0.634)
+        #expect((levels.max() ?? 1) - (levels.min() ?? 0) < 0.002)
+        #expect(close(levels[0], 0.5708, 0.001))
+    }
+
+    /// Le doigt s'arrête, iOS se tait 400 ms, puis reprend tout près : rien ne
+    /// saute.
+    @Test("Une pause du doigt ne fait pas sauter le niveau")
+    func pauseKeepsTheSlide() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.5186)
+        let before = slide(&model, [0.32321206, 0.40], shown: 0.5186)
+        let after = model.obey(posed: 0.398, shown: 0.40, now: 100.065 + 0.4)
+        #expect(after.press == nil)
+        #expect(abs(after.level - before[1]) < 0.01)
+    }
+
+    /// Un toucher sur la piste, loin du curseur : la barre saute sous le doigt,
+    /// Milō aussi.
+    @Test("Un toucher loin du curseur y mène Milō")
+    func tapFarFromTheCursor() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.518)
+        let tap = model.obey(posed: 0.054930817, shown: 0.518, now: 100)
+        #expect(tap.press == nil)
+        #expect(close(tap.level, 0.0549))
+    }
+
+    /// 17:36:59–17:37:02 : un bouton maintenu, répété par iOS toutes les
+    /// 150–200 ms, pile sur la grille de 1/16. Ce sont des appuis.
+    @Test("Un bouton maintenu reste une suite d'appuis")
+    func heldButtonIsNotADrag() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.1505)
+        var now = 100.0
+        for posed in [0.213, 0.2755, 0.338, 0.4005, 0.463, 0.5255] {
+            let command = model.obey(posed: posed, shown: posed - 1.0 / 16, now: now)
+            #expect(command.press?.up == true)
+            #expect(close(command.level, posed))
+            now += 0.165
+        }
+    }
+
+    /// Volume presque à zéro, rapport connu : le doigt suit le rapport.
+    @Test("Tout en bas, le glissement suit le rapport connu")
+    func slideFromTheBottomUsesTheKnownRatio() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.02 / 0.8, 0.02)
+        let levels = slide(&model, [0.016, 0.1], shown: 0.02)
+        #expect(close(levels[0], 0.02, 0.001))
+        #expect(close(levels[1], 0.125, 0.001))
+    }
+
     /// 22:58:22 : baissé ailleurs de 0,50 à 0,08. iOS engage 0,1425 et ne pose
-    /// que 0,0228 (rapport 0,16) — sous le niveau montré, pour un « + ».
-    @Test("Baissé ailleurs, un « + » se relit « + »")
+    /// que 0,0228 (rapport 0,16) : c'est 0,1425 qu'il attend.
+    @Test("Baissé ailleurs, un « + » écrit le G d'iOS")
     func plusAfterLoweredElsewhere() {
         var model = SystemVolumeModel()
         seen(&model, 0.50, 0.08)
         #expect(close(model.ratio, 0.16))
 
-        let reading = model.interpret(posed: 0.0228, shown: 0.08, now: 100)
-        #expect(reading.up)
-        #expect(reading.commit.map { close($0, 0.1425) } == true)
+        let command = model.obey(posed: 0.0228, shown: 0.08, now: 100)
+        #expect(command.press?.up == true)
+        #expect(close(command.level, 0.1425))
     }
 
     /// 22:58:45 : sous un rapport de 0,16, la carte affiche ce qu'iOS vient de
-    /// poser (0,0469) et le « + » rapproché suivant engage 0,1094. Lu comme un
-    /// glissement, Milō plongeait vers -78 dB.
-    @Test("Des « + » rapprochés sous un rapport déréglé restent des « + »")
+    /// poser (0,0469) et le « + » rapproché suivant engage 0,1094, sous le
+    /// niveau de Milō. Un « + » ne baisse jamais Milō : il fait un pas d'iOS.
+    @Test("Des « + » rapprochés sous un rapport déréglé montent d'un pas chacun")
     func rapidPlusesStayPluses() {
         var model = SystemVolumeModel()
         seen(&model, 0.2308 / 0.16, 0.2308)
-        #expect(close(model.ratio, 0.16))
+        var shown = 0.2308
+        for (posed, at) in [(0.046927, 100.0), (0.017508, 100.48), (0.012801, 100.95)] {
+            let command = model.obey(posed: posed, shown: shown, now: at)
+            #expect(command.press?.up == true)
+            #expect(close(command.level, shown + SystemVolumeModel.step, 0.000_1))
+            shown = command.level
+        }
+    }
 
-        #expect(model.interpret(posed: 0.046927, shown: 0.2308, now: 100).up)
-        #expect(model.interpret(posed: 0.017508, shown: 0.2594, now: 100.48).up)
-        #expect(model.interpret(posed: 0.012801, shown: 0.2880, now: 100.95).up)
+    /// Rejeu du 29/10, 15:11:49 (rapport 0,431) : les « − » rapprochés
+    /// engagent depuis ce qu'iOS vient de poser. Écrits tels quels, ils
+    /// menaient Milō de 0,436 au silence en trois appuis.
+    @Test("Des « − » rapprochés descendent d'un pas chacun")
+    func rapidMinusesStepOnce() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.4364 / 0.43101, 0.4364)
+        var shown = 0.4359
+        for (posed, at) in [(0.1611551, 49.010), (0.042521458, 49.497), (0.0, 49.876)] {
+            let command = model.obey(posed: posed, shown: shown, now: at)
+            #expect(command.press?.up == false)
+            #expect(close(command.level, shown - SystemVolumeModel.step, 0.000_1))
+            shown = command.level
+        }
+    }
+
+    /// Revue du 29/10 : Milō écrit à 1, quelqu'un le baisse à 0,6667 moins
+    /// d'une seconde après ; la valeur optimiste reste fraîche trois secondes.
+    /// Un « − » à 1,5 s partait de 1 et remontait Milō.
+    @Test("Un appui part de ce que Milō rapporte quand l'optimiste est périmé")
+    func pressFromTheReportedLevel() {
+        var model = SystemVolumeModel()
+        seen(&model, 1)
+        _ = model.obey(posed: 1, shown: 0.9375, now: 100)
+        model.observe(0.6667, session: "s", duringCommand: true, now: 100.8)
+        let command = model.obey(posed: 0.9375, shown: 1, reported: 0.6667, now: 101.5)
+        #expect(command.press?.up == false)
+        #expect(close(command.level, 0.6667 - SystemVolumeModel.step, 0.000_1))
     }
 
     /// 23:29:03 : la carte montrait encore 0,9995 quand le global est tombé à
     /// 0,6667 ailleurs, une milliseconde avant le rappel d'un « − » (iOS : 0,9375).
-    /// Relu avec un rapport de 0,667, c'était 1,41 : écrit en absolu, le global
-    /// est monté à 1 et un client est passé de 0 à 100 %.
-    @Test("Un « − » parti juste avant un changement fait ailleurs reste un « − »")
+    /// Écrit tel quel, le global est monté à 1 et un client est passé de 0 à
+    /// 100 %.
+    @Test("Un « − » parti juste avant un changement fait ailleurs baisse Milō")
     func minusRacingAnExternalChange() {
         var model = SystemVolumeModel()
         seen(&model, 1.0, 0.9995, from: 90)
         model.observe(0.6667, session: "s", duringCommand: false, now: 100)
-        #expect(close(model.ratio, 0.6667))
 
-        let reading = model.interpret(posed: 0.9375, shown: 0.6667, now: 100.001)
-        #expect(reading.up == false)
+        let command = model.obey(posed: 0.9375, shown: 0.6667, now: 100.001)
+        #expect(command.press?.up == false)
+        #expect(close(command.expected, 0.9375, 0.001))
+        #expect(close(command.level, 0.6667 - 1.0 / 16, 0.001))
     }
 
-    @Test("iOS sain : l'appui est exactement affiché ± 1/16")
-    func healthy() {
-        var model = SystemVolumeModel()
-        seen(&model, 0.3205)
-        #expect(model.interpret(posed: 0.383, shown: 0.3205, now: 100).up)
-        #expect(model.interpret(posed: 0.3205, shown: 0.383, now: 102).up == false)
-    }
-
-    @Test("Un « − » sous le premier cran est un « − »")
+    @Test("Un « − » sous le premier cran met Milō à zéro")
     func downToTheFloor() {
         var model = SystemVolumeModel()
         seen(&model, 0.03)
-        #expect(model.interpret(posed: 0, shown: 0.03, now: 100).up == false)
-        // iOS garde ses rapports à zéro : le « + » suivant se relit encore.
+        let command = model.obey(posed: 0, shown: 0.03, now: 100)
+        #expect(command.press?.up == false)
+        #expect(command.level == 0)
+        // iOS garde ses rapports à zéro.
         #expect(close(model.ratio, 1))
     }
 
-    /// 17/10, 00:50:25 → 00:50:30 : quatre « + » puis trois « − » puis deux
-    /// « + », appuis à ~0,6 s, sous un rapport de 0,909 que le modèle croyait
-    /// à 1. Relus comme des glissements et écrits tels quels, les « + »
-    /// montaient de ~2 dB et les « − » descendaient de ~6 dB. `shown` est ce
-    /// que Milō rendait après chacun de ses crans de 2 dB.
-    @Test("Un rapport mal suivi coûte au pire le sens, jamais un saut")
-    func driftedRatioKeepsTheDirection() {
+    /// 17/10, 00:50:25 : iOS tenait 0,909, le modèle croyait 1. Le premier
+    /// appui ne se reconnaît pas ; le deuxième suppose le même rapport, et à
+    /// partir de lui chaque appui écrit le G exact. Sans cela, chaque « + »
+    /// posait 0,909 × G et Milō plafonnait vers 0,62.
+    @Test("Un rapport inconnu s'apprend au deuxième appui")
+    func unknownRatioIsLearned() {
         var model = SystemVolumeModel()
         seen(&model, 0.1716)
-        #expect(close(model.ratio, 1))
-
-        let presses: [(posed: Double, shown: Double, at: TimeInterval, up: Bool)] = [
-            (0.21268801, 0.1716, 100.000, true),
-            (0.2500179, 0.2002, 100.797, true),
-            (0.28393343, 0.2288, 101.465, true),
-            (0.31474686, 0.2574, 102.080, true),
-            (0.22917508, 0.2860, 102.690, false),
-            (0.15143012, 0.2574, 103.363, false),
-            (0.080796115, 0.2288, 104.080, false),
-            (0.13018952, 0.2002, 104.831, true),
-            (0.17506516, 0.2288, 105.450, true),
-        ]
-        for (i, press) in presses.enumerated() {
-            let reading = model.interpret(posed: press.posed, shown: press.shown, now: press.at)
-            #expect(reading.up == press.up)
-            // Le premier ne se relit qu'au sens, et il apprend le rapport : les
-            // suivants sont reconnus.
-            #expect(reading.guessed == (i == 0))
+        var shown = 0.1716
+        var at = 100.0
+        for (i, up) in [true, true, true, true, false, false, false, true, true].enumerated() {
+            let commit = shown + (up ? 1 : -1) * SystemVolumeModel.step
+            let command = model.obey(posed: 0.9086 * commit, shown: shown, now: at)
+            #expect((command.level > shown) == up)
+            if i > 0 {
+                #expect(command.press?.up == up)
+                #expect(close(command.level, commit, 0.001))
+            }
+            shown = command.level
+            at += 2
         }
         #expect(close(model.ratio, 0.9086, 0.001))
-    }
-
-    /// Le même rapport, cette fois suivi : chaque appui est reconnu.
-    @Test("Un rapport bien suivi reconnaît chaque appui")
-    func trackedRatioRecognizesPresses() {
-        var model = SystemVolumeModel()
-        seen(&model, 0.1716 / 0.9086, 0.1716)
-        #expect(close(model.ratio, 0.9086, 0.001))
-
-        let first = model.interpret(posed: 0.21268801, shown: 0.1716, now: 100)
-        #expect(first.up && !first.guessed)
-        #expect(first.ratio.map { close($0, 0.9086, 0.002) } == true)
-        let second = model.interpret(posed: 0.2500179, shown: 0.2002, now: 100.797)
-        #expect(second.up)
-        #expect(second.commit.map { close($0, 0.2752, 0.001) } == true)
-        // 0,9086 × (0,2500 − 1/16)
-        let third = model.interpret(posed: 0.17034, shown: 0.2288, now: 101.4)
-        #expect(third.up == false)
-        #expect(!third.guessed)
     }
 
     /// iOS est reparti de zéro sans qu'on le voie : le rapport suivi ne lit
@@ -625,9 +784,14 @@ struct SystemVolumeModelTests {
     func unseenReset() {
         var model = SystemVolumeModel()
         seen(&model, 0.50, 0.08)
-        let reading = model.interpret(posed: 0.1425, shown: 0.08, now: 100)
-        #expect(reading.up)
-        #expect(reading.ratio.map { close($0, 1) } == true)
+        let command = model.obey(posed: 0.1425, shown: 0.08, now: 100)
+        #expect(command.press?.up == true)
+        #expect(close(command.level, 0.1425))
+        // Un seul appui ne suffit pas à changer de rapport ; le suivant le
+        // confirme.
+        let next = model.obey(posed: 0.1425 + 1.0 / 16, shown: 0.1425, now: 102)
+        #expect(next.learned)
+        #expect(close(model.ratio, 1, 0.001))
     }
 
     @Test("Une autre session repart de zéro")
@@ -640,34 +804,31 @@ struct SystemVolumeModelTests {
 
     /// 29/10, 15:11:49 → 15:11:53 : un push tardif fait perdre au rendu son
     /// écart de confirmation hors commande (0,321 → 0,3205). iOS l'ignore et
-    /// engage encore depuis 0,321 à 0,431 ; le modèle l'adoptait, suivait 1, et
-    /// relisait le « + » suivant « − » au sens seul.
+    /// engage encore depuis 0,321 à 0,431.
     @Test("Un écart de confirmation perdu sur un push n'efface pas le rapport")
     func confirmationOffsetLostOnAPush() {
         var model = SystemVolumeModel()
         seen(&model, 0.4364 / 0.43101, 0.4364)
-        #expect(close(model.ratio, 0.4310, 0.001))
-        #expect(model.interpret(posed: 0.1611551, shown: 0.4359, now: 49.010).up == false)
+        #expect(model.obey(posed: 0.1611551, shown: 0.4359, now: 49.010).press?.up == false)
         model.observe(0.3979, session: "s", duringCommand: true, now: 49.027)
-        #expect(model.interpret(posed: 0.042521458, shown: 0.3974, now: 49.497).up == false)
+        #expect(model.obey(posed: 0.042521458, shown: 0.3974, now: 49.497).press?.up == false)
         model.observe(0.3595, session: "s", duringCommand: true, now: 49.521)
-        #expect(model.interpret(posed: 0, shown: 0.3590, now: 49.876).up == false)
+        #expect(model.obey(posed: 0, shown: 0.3590, now: 49.876).press?.up == false)
         model.observe(0.3210, session: "s", duringCommand: true, now: 49.901)
 
         model.observe(0.3205, session: "s", duringCommand: false, now: 52.104)
         #expect(close(model.ratio, 0.4310, 0.001))
 
-        let reading = model.interpret(posed: 0.16529281, shown: 0.3205, now: 53.628)
-        #expect(reading.up)
-        #expect(!reading.guessed)
+        let command = model.obey(posed: 0.16529281, shown: 0.3205, now: 53.628)
+        #expect(command.press?.up == true)
         // 0,16529 = 0,43101 × (0,321 + 1/16) : l'affichage d'iOS, écart compris.
-        #expect(reading.commit.map { close($0, 0.3835, 0.0002) } == true)
+        #expect(close(command.expected, 0.3835, 0.0002))
+        #expect(close(command.level, 0.3205 + 1.0 / 16, 0.000_1))
     }
 
-    /// L'état resté dans le conteneur après la trace du 29/10 : plafond et
-    /// référence à 0,3974, soit un rapport de 1, quand iOS tient 0,431. Il doit
-    /// se relire tel quel, et son dernier appui (0,1612 / 0,3734) redonner le
-    /// rapport.
+    /// L'état resté dans le conteneur après la trace du 29/10, rangé avant
+    /// `anchor` : il doit se relire tel quel, et son dernier appui
+    /// (0,1612 / 0,3734) redonner le rapport.
     @Test("L'état rangé avant la correction relit le premier appui")
     func storedStateFromBeforeTheFix() throws {
         let json = #"""
@@ -679,11 +840,11 @@ struct SystemVolumeModelTests {
         #expect(close(stored.ratio, 1))
 
         var plus = stored
-        let up = plus.interpret(posed: 0.43101 * (0.3979 + 1.0 / 16), shown: 0.3974, now: 100)
-        #expect(up.up && !up.guessed)
+        #expect(plus.obey(posed: 0.43101 * (0.3979 + 1.0 / 16), shown: 0.3974, now: 100)
+            .press?.up == true)
         var minus = stored
-        let down = minus.interpret(posed: 0.43101 * (0.3979 - 1.0 / 16), shown: 0.3974, now: 100)
-        #expect(!down.up && !down.guessed)
+        #expect(minus.obey(posed: 0.43101 * (0.3979 - 1.0 / 16), shown: 0.3974, now: 100)
+            .press?.up == false)
     }
 
     /// Un niveau que le modèle adopte et pas iOS — ici 0,0015 hors commande,
@@ -693,14 +854,27 @@ struct SystemVolumeModelTests {
     func anchorSurvivesAnUnsharedAdoption() {
         var model = SystemVolumeModel()
         seen(&model, 0.3210 / 0.431, 0.3210)
-        #expect(model.interpret(posed: 0.431 * (0.3210 + 1.0 / 16), shown: 0.3210, now: 100).up)
-        model.observe(0.3595, session: "s", duringCommand: true, now: 100.05)
-        model.observe(0.3610, session: "s", duringCommand: false, now: 103)
+        #expect(model.obey(posed: 0.431 * (0.3210 + 1.0 / 16), shown: 0.3210, now: 100)
+            .press?.up == true)
+        model.observe(0.3835, session: "s", duringCommand: true, now: 100.05)
+        model.observe(0.3850, session: "s", duringCommand: false, now: 103)
         #expect(model.ratio > 0.9)
 
-        let reading = model.interpret(posed: 0.431 * (0.3595 + 1.0 / 16), shown: 0.3610, now: 104)
-        #expect(reading.up)
-        #expect(!reading.guessed)
+        let command = model.obey(posed: 0.431 * (0.3850 + 1.0 / 16), shown: 0.3850, now: 104)
+        #expect(command.press?.up == true)
+        #expect(close(command.level, 0.3850 + 1.0 / 16, 0.001))
+    }
+
+    /// Le cas d'origine : en bas de course, le rendu porte l'écart de
+    /// confirmation (0,0633 pour 0,0628) et le bon « − » supposait un rapport
+    /// > 1,04 depuis 0,0628.
+    @Test("En bas de course, un « − » depuis le rendu avec son écart reste un « − »")
+    func minusAtTheBottomWithTheOffset() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.0633 / 0.431, 0.0633)
+        let command = model.obey(posed: 0.431 * (0.0633 - 1.0 / 16), shown: 0.0628, now: 100)
+        #expect(command.press?.up == false)
+        #expect(command.level < 0.0628)
     }
 
     /// En bas de course, juste après un appui engagé à zéro, le « − » suivant
@@ -710,12 +884,14 @@ struct SystemVolumeModelTests {
     func minusAfterAZeroCommitAtTheBottom() {
         var model = SystemVolumeModel()
         seen(&model, 0.1205 / 0.431, 0.1205)
-        #expect(model.interpret(posed: 0.431 * (0.1205 - 1.0 / 16), shown: 0.1200, now: 100).up == false)
-        model.observe(0.0919, session: "s", duringCommand: true, now: 100.06)
-        #expect(model.interpret(posed: 0, shown: 0.0914, now: 100.45).up == false)
-        model.observe(0.0633, session: "s", duringCommand: true, now: 100.51)
+        #expect(model.obey(posed: 0.431 * (0.1205 - 1.0 / 16), shown: 0.1200, now: 100)
+            .press?.up == false)
+        model.observe(0.0585, session: "s", duringCommand: true, now: 100.06)
+        #expect(model.obey(posed: 0, shown: 0.0580, now: 100.45).press?.up == false)
+        model.observe(0.0005, session: "s", duringCommand: true, now: 100.51)
 
-        let reading = model.interpret(posed: 0.431 * (0.0633 - 1.0 / 16), shown: 0.0628, now: 101.65)
-        #expect(reading.up == false)
+        let command = model.obey(posed: 0, shown: 0, now: 101.65)
+        #expect(command.press?.up == false)
+        #expect(command.level == 0)
     }
 }
