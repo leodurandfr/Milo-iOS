@@ -45,14 +45,19 @@ struct IncreaseVolumeIntent: AppIntent {
         let limits = MiloAPIClient.volumeLimits()
         let targetDB = min(max(currentDB + effectiveStep, limits.min), limits.max)
 
+        let interaction = Date().timeIntervalSince1970
         defaults?.set(targetDB, forKey: MiloAPIClient.lastVolumeKey)
-        defaults?.set(Date().timeIntervalSince1970, forKey: MiloAPIClient.lastInteractionKey)
+        defaults?.set(interaction, forKey: MiloAPIClient.lastInteractionKey)
 
         // Reload immédiat pour switcher logo → volume sans attendre le réseau
         WidgetCenter.shared.reloadAllTimelines()
 
-        // Fire-and-forget : envoie le delta au serveur
-        MiloAPIClient.fireAdjustVolume(delta_db: effectiveStep)
+        // Attendu avant de rendre la main : une fois `perform()` terminé, le
+        // processus du widget peut être suspendu, requête comprise. Le niveau
+        // d'avant le tap sert à annuler l'affichage optimiste si le pas échoue.
+        await MiloAPIClient.adjustVolume(delta_db: effectiveStep,
+                                         previousDB: currentDB,
+                                         interaction: interaction)
 
         return .result()
     }

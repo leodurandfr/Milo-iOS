@@ -98,14 +98,19 @@ struct MiloAPIClient {
     /// `HEAD /` de l'extension dans le journal de nginx en vingt minutes. Une
     /// tâche détachée ne survit pas au processus qui l'a lancée, et une
     /// connexion TCP encore moins.
-    /// Deux chemins restent délibérément sur `URLSession.shared` :
     ///
-    /// - **les pochettes**, qui pèsent des centaines de kilooctets et partent le
-    ///   plus souvent vers Internet. Les laisser ici, c'est mettre une commande
-    ///   derrière un téléchargement d'un demi-mégaoctet ;
-    /// - **la sonde** de `MiloRemoteSession`, dont tout l'objet est de mesurer
-    ///   ce qu'une connexion neuve obtient. Sur un pool réutilisé elle mesurerait
-    ///   le pool.
+    /// **Les pochettes** restent délibérément sur `URLSession.shared` : elles
+    /// pèsent des centaines de kilooctets et partent le plus souvent vers
+    /// Internet. Les laisser ici, c'est mettre une commande derrière un
+    /// téléchargement d'un demi-mégaoctet.
+    ///
+    /// La sonde de `MiloRemoteSession` (`probeReachable`), elle, ne mesure
+    /// **pas** une connexion neuve : elle passe par `lanData` comme le reste.
+    /// Elle ne tourne que dans l'extension Now Playing, donc sur le transport
+    /// lié au Wi-Fi (`scopedTransport`), l'IP en cache d'abord puis
+    /// `milo.local`. Ce qu'elle répond, c'est « l'adresse qu'on utiliserait
+    /// pour une commande répond-elle ? », pas « que donnerait une résolution
+    /// fraîche de `milo.local` ? ».
     nonisolated static let lan: URLSession = {
         let configuration = URLSessionConfiguration.default
         // Ne pas attendre un réseau qui n'est pas là : dans une extension, un
@@ -214,7 +219,39 @@ struct MiloAPIClient {
     ///
     /// Ça ne remplace pas de rendre `.local` au mDNS côté réseau ; ça empêche
     /// seulement l'app d'être la victime de ce qu'elle ne contrôle pas.
+    ///
+    /// Une seule passe à la fois : voir `IPResolution`.
     static func resolveAndCacheIPAddress() async {
+        guard await IPResolution.shared.begin() else { return }
+        await resolveAndCacheIPAddressPass()
+        await IPResolution.shared.end()
+    }
+
+    /// Empêche deux résolutions simultanées.
+    ///
+    /// Les gardes de fraîcheur et de répit ne sont écrites qu'en fin de passe,
+    /// et une passe dure jusqu'à trois secondes de `getaddrinfo` plus 1,5 s par
+    /// candidat — plus que l'intervalle de trois secondes du sondage de l'app
+    /// tant qu'elle est déconnectée, qui en lance une à chaque `.ready`. Deux passes se chevauchaient donc, et
+    /// celle qui échouait pendant un creux du Wi-Fi effaçait l'adresse que
+    /// l'autre venait de valider.
+    ///
+    /// Le retardataire repart sans rien faire plutôt que d'attendre : la passe
+    /// en vol écrira de toute façon la garde qui l'aurait arrêté.
+    private actor IPResolution {
+        static let shared = IPResolution()
+        private var inFlight = false
+
+        func begin() -> Bool {
+            guard !inFlight else { return false }
+            inFlight = true
+            return true
+        }
+
+        func end() { inFlight = false }
+    }
+
+    private static func resolveAndCacheIPAddressPass() async {
         guard let defaults = UserDefaults(suiteName: appGroupID) else { return }
 
         let now = Date().timeIntervalSince1970
@@ -389,40 +426,66 @@ struct MiloAPIClient {
         )
     }
 
-    /// Fire-and-forget : lance la requête sans bloquer l'appelant
-    static func fireAdjustVolume(delta_db: Double) {
-        guard let url = URL(string: baseURL() + "/api/volume/adjust") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 2
-        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    /// Envoie le pas de volume d'un tap du widget, puis réconcilie le cache
+    /// partagé avec ce que Milō a réellement appliqué.
+    ///
+    /// **Attendue** par l'intent, et non plus lancée dans le vide : `perform()`
+    /// rendu, l'extension WidgetKit peut être suspendue à tout moment — avant
+    /// que le `POST` parte, ou avant que sa réponse arrive. Le pas était alors
+    /// perdu pendant que le widget l'affichait appliqué, ou appliqué sans que le
+    /// widget se recale sur le niveau borné par Milō. Même règle que
+    /// `MiloTimelineProvider`, qui attend ses requêtes pour la même raison.
+    /// L'attente coûte un aller-retour LAN, après le rechargement optimiste :
+    /// le tap s'affiche toujours sans délai.
+    ///
+    /// - `previousDB` : le niveau d'avant le tap, rétabli si le pas n'a pas été
+    ///   appliqué — sans quoi le widget garde un niveau que Milō n'a jamais eu.
+    /// - `interaction` : l'horodatage que l'intent vient d'écrire dans
+    ///   `lastInteractionKey`. S'il n'y est plus, un tap plus récent a écrit sa
+    ///   propre valeur optimiste, et c'est à lui de conclure : l'écraser ferait
+    ///   reculer l'affichage pendant une rafale.
+    ///
+    /// Passe par `post`, donc par `lanData` et `forgetCachedIPAddress`, comme
+    /// tout ce qui part vers Milō.
+    static func adjustVolume(delta_db: Double, previousDB: Double, interaction: TimeInterval) async {
+        let defaults = UserDefaults(suiteName: appGroupID)
+        let isLatest = { (defaults?.double(forKey: lastInteractionKey) ?? 0) <= interaction }
+
         let bodyDict: [String: Any] = ["delta_db": delta_db, "show_bar": true]
         guard let body = try? JSONSerialization.data(withJSONObject: bodyDict) else { return }
-        request.httpBody = body
-        let requestTime = Date().timeIntervalSince1970
-        lan.dataTask(with: request) { data, _, _ in
-            guard let data = data,
-                  let response = try? JSONDecoder().decode(VolumeResponse.self, from: data),
-                  response.status == "success",
-                  let db = response.volume_db else {
-                cacheReachability(false)
-                return
-            }
-            let defaults = UserDefaults(suiteName: appGroupID)
-            cacheReachability(true)
-            // Réponse périmée : un tap plus récent a déjà écrit sa valeur optimiste,
-            // l'écraser ferait reculer l'affichage pendant une rafale de taps.
-            guard requestTime >= (defaults?.double(forKey: lastInteractionKey) ?? 0) else { return }
+
+        let data: Data
+        do {
+            data = try await post(path: "/api/volume/adjust", body: body, timeout: 2)
+        } catch {
+            // Pas de réponse HTTP du tout : là seulement, Milō est injoignable.
+            // Rechargé dans tous les cas : le rechargement du tap a construit
+            // ses entrées sur l'ancien verdict, ce `false` n'apparaîtrait jamais.
+            cacheReachability(false)
+            if isLatest() { defaults?.set(previousDB, forKey: lastVolumeKey) }
+            WidgetCenter.shared.reloadAllTimelines()
+            return
+        }
+
+        // Milō a répondu, quel que soit le code : il est joignable. Un 500
+        // (« Failed to adjust volume ») ou un 422 arrivent en `{"detail": …}`,
+        // qui ne se décode pas en `VolumeResponse` — c'est un ordre refusé, pas
+        // un appareil absent, et le logo n'a pas à s'éteindre pour autant.
+        cacheReachability(true)
+        guard isLatest() else { return }
+
+        if let response = try? JSONDecoder().decode(VolumeResponse.self, from: data),
+           response.status == "success",
+           let db = response.volume_db {
             defaults?.set(db, forKey: lastVolumeKey)
-            defaults?.set(requestTime, forKey: lastInteractionKey)
-            // Debounce 300ms : ne reload que si aucun nouveau tap entre-temps
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
-                if defaults?.double(forKey: lastInteractionKey) == requestTime {
-                    WidgetCenter.shared.reloadAllTimelines()
-                }
-            }
-        }.resume()
+        } else {
+            // Refusé : le pas n'a pas été appliqué, on rend le niveau d'avant.
+            defaults?.set(previousDB, forKey: lastVolumeKey)
+        }
+        // Plus de temporisation de 300 ms avant ce rechargement : elle visait un
+        // rappel détaché, et la garde `isLatest` écarte déjà une réponse qu'un
+        // tap plus récent a rendue périmée.
+        WidgetCenter.shared.reloadAllTimelines()
     }
 
     /// Synchronise limites et pas de volume depuis les settings backend.
