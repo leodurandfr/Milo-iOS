@@ -307,6 +307,18 @@ extension MiloAPIClient {
         case failed
     }
 
+    /// Le global tel que Milō le tient, 0…1 — `global_volume`, la moyenne
+    /// des enceintes que la carte représente. Court : il précède l'écriture
+    /// d'un rappel, que `mediaremoted` n'attend que trois secondes.
+    static func currentGlobalVolume(timeout: TimeInterval = 0.5) async -> Double? {
+        guard let data = try? await get(path: "/api/volume/state", timeout: timeout),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let payload = json["data"] as? [String: Any],
+              let level = (payload["global_volume"] as? NSNumber)?.doubleValue
+        else { return nil }
+        return min(max(level, 0), 1)
+    }
+
     /// Un rappel de la carte : le global, en absolu, au niveau qu'iOS attend
     /// (`SystemVolumeModel.obey`).
     ///
@@ -598,7 +610,8 @@ enum VolumeCommand {
 /// partagé : l'extension change de processus sans arrêt, iOS garde son état.
 struct SystemVolumeModel: Codable, Equatable {
 
-    /// La session dont iOS tient cet état ; une autre repart de zéro.
+    /// La session dont iOS tient ce rapport ; une autre repart à 1, mais
+    /// garde ce que la carte affichait (`observe`).
     var session: String?
     /// Le plafond d'iOS : le G par lequel il divise.
     var ceiling: Double = 0
@@ -704,7 +717,7 @@ struct SystemVolumeModel: Codable, Equatable {
     /// rappel `onChange`, que la carte affiche sans l'adopter.
     mutating func observe(_ level: Double, session id: String, duringCommand: Bool,
                           now: TimeInterval) {
-        if session != id { self = SystemVolumeModel(session: id) }
+        if session != id { self = carried(to: id) }
         let changed = lastSeen.map { abs($0 - level) > Self.unnoticed } ?? true
         if changed {
             previousSeen = lastSeen
@@ -719,6 +732,35 @@ struct SystemVolumeModel: Codable, Equatable {
         guard changed, !duringCommand else { return }
         reference = level
         ceiling = max(ceiling, level)
+    }
+
+    /// Une autre session : le rapport repart à 1, pas l'affichage.
+    ///
+    /// iOS ne repart pas de zéro avec la session : le 30/10 à 11:35:15,663,
+    /// sur `b37c8445` qu'une ré-annonce venait de reconstruire, il a engagé un
+    /// « − » depuis 0,0785 — ce que la carte de l'autre session affichait —
+    /// quand le rendu de la nouvelle disait 0,01. Remis à zéro, le modèle ne
+    /// connaissait plus 0,0785, a lu un doigt et écrit 0,016 en absolu : le
+    /// volume monté sur Milo-Mac juste avant est retombé au plancher.
+    private func carried(to id: String) -> SystemVolumeModel {
+        var next = SystemVolumeModel(session: id)
+        next.lastSeen = lastSeen
+        next.previousSeen = previousSeen
+        next.seenAt = seenAt
+        next.lastPosed = lastPosed
+        next.lastCommit = lastCommit
+        next.lastAt = lastAt
+        next.rawAt = rawAt
+        next.returnedAt = returnedAt
+        return next
+    }
+
+    /// Le rappel ouvrirait-il un geste, loin de toute écriture ? Alors la
+    /// carte a pu rester sur un niveau périmé, et Milō vaut d'être relu.
+    func opensGesture(at now: TimeInterval) -> Bool {
+        let following = rawAt.map { now - $0 < Self.dragGap } == true
+            || returnedAt.map { now - $0 < Self.returnGap } == true
+        return !following && now - lastAt > Self.settled
     }
 
     /// Le niveau qu'un rappel demande : `posed` est ce qu'iOS pose, `shown` ce
@@ -941,7 +983,25 @@ private actor VolumeGesture {
     /// Rend `true` quand l'écrivain que ce rappel a attendu a écrit quelque
     /// chose : il y a du neuf à faire relire.
     func record(posed: Double, shown: Double, reported: Double) async -> Bool {
+        // L'arrivée du rappel, prise avant la relecture : chaque fenêtre du
+        // modèle — rendu d'avant, ce qu'iOS vient de poser — se mesure à
+        // partir d'elle. Prise après, une relecture d'une demi-seconde faisait
+        // oublier l'affichage d'où iOS était parti, et l'appui redevenait un
+        // doigt écrit en absolu.
         let now = Date().timeIntervalSince1970
+        var reported = reported
+        // Le niveau de Milō, relu au début d'un geste : celui des attributs ne
+        // vaut que ce que vaut le dernier push, et le 30/10 aucun n'arrivait
+        // plus — un appui reconnu serait parti du plancher au lieu du volume
+        // monté sur Milo-Mac. Un aller-retour sur le LAN, une fois par geste ;
+        // en cas d'échec, on garde celui des attributs.
+        if SystemVolumeModel.update({ $0.opensGesture(at: now) }),
+           let fresh = await MiloAPIClient.currentGlobalVolume() {
+            if abs(fresh - reported) > SystemVolumeModel.step {
+                MiloAPIClient.trace?("Milō relu à \(Self.rounded(fresh)), carte à \(Self.rounded(reported))")
+            }
+            reported = fresh
+        }
         let command = SystemVolumeModel.update {
             $0.obey(posed: posed, shown: shown, reported: reported, now: now)
         }

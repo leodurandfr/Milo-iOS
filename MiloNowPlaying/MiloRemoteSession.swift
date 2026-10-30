@@ -693,7 +693,10 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
 
         // Tracée quand elle change : sans elle au journal, ce qu'iOS demande
         // ensuite n'est pas interprétable.
-        Self.traceBase("\(system.id)=\(((level * 10000).rounded()) / 10000)")
+        // Préfixée de la session : deux sessions vivantes rendent chacune la
+        // leur, et sans ce repère la trace du 30/10 ne disait pas laquelle
+        // avait reçu quel appui.
+        Self.traceBase(session: id, "\(id.prefix(8)) \(system.id)=\(((level * 10000).rounded()) / 10000)")
 
         // Ce que la barre reçoit, à chaque lecture : c'est le repère de
         // « appui → la barre a le nouveau niveau ».
@@ -722,7 +725,7 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                     // pas une fermeture jamais appelée d'une requête qui
                     // échoue, et ce sont deux causes opposées.
                     miloLog.notice("RAPPEL VOLUME \(system.id, privacy: .public) -> \(newLevel, privacy: .public)")
-                    Self.trace("onChange \(system.id) -> \(newLevel)")
+                    Self.trace("onChange \(session.prefix(8)) \(system.id) -> \(newLevel)")
                     let sent = await MiloAPIClient.applyVolume(to: newLevel, shown: base,
                                                                reported: system.volume)
                     // Seul un rappel dont l'écrivain a écrit fait relire : un
@@ -839,12 +842,14 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
 
     /// N'écrit que si la base a bougé : `devices` est relu à chaque changement
     /// observé, et le tracer à chaque lecture chasserait le geste du journal.
-    nonisolated(unsafe) private static var lastBase = ""
+    /// Par session : deux sessions vivantes au même niveau alterneraient
+    /// sinon, et chaque lecture écrirait sa ligne.
+    nonisolated(unsafe) private static var lastBase: [String: String] = [:]
 
-    nonisolated private static func traceBase(_ base: String) {
+    nonisolated private static func traceBase(session: String, _ base: String) {
         traceLock.lock()
-        let changed = base != lastBase
-        lastBase = base
+        let changed = base != lastBase[session]
+        lastBase[session] = base
         traceLock.unlock()
         guard changed else { return }
         trace("base \(base)")
@@ -887,6 +892,7 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         let updates = pushTokenUpdates
         pushTokenObservation = Task {
             for await token in updates {
+                Self.trace("token reçu \(sessionID.prefix(8))")
                 // Par la garde, comme les autres. Sans elle ce flux redéposait
                 // le même token à chaque réveil — deux POST par changement de
                 // station, mesurés dans le journal de Milō — et chacun pris sur
@@ -912,6 +918,9 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                 token de session absent (\(occasion, privacy: .public)) \
                 \(sessionID, privacy: .public)
                 """)
+            // Aussi dans la trace : le 30/10, `b37c8445` n'a jamais eu de
+            // token, et rien dans le conteneur ne le disait.
+            Self.trace("token absent (\(occasion)) \(sessionID.prefix(8))")
             return
         }
         guard Self.claim(Self.stamp(sessionID, token)) else { return }

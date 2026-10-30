@@ -900,6 +900,33 @@ struct SystemVolumeModelTests {
         #expect(close(model.ratio, 1))
     }
 
+    /// 30/10, 11:35:08 → 11:35:15 : la carte d'une session montre 0,0785 ;
+    /// une ré-annonce reconstruit l'autre, dont le rendu périmé dit 0,01, et
+    /// iOS engage un « − » depuis 0,0785 deux millisecondes plus tard. Milō
+    /// avait été monté entre-temps sur Milo-Mac.
+    @Test("Un appui juste après un changement de session part du vrai niveau de Milō")
+    func pressAcrossASessionChange() {
+        var model = SystemVolumeModel()
+        model.observe(0.0785, session: "A", duringCommand: false, now: 100)
+        model.observe(0.01, session: "B", duringCommand: false, now: 107.661)
+        #expect(model.opensGesture(at: 107.663))
+
+        let command = model.obey(posed: 0.016000003, shown: 0.01, reported: 0.50, now: 107.663)
+
+        #expect(command.press?.up == false)
+        #expect(close(command.level, 0.50 - SystemVolumeModel.step))
+    }
+
+    @Test("Un rappel qui suit un glissement n'ouvre pas de geste")
+    func followingCallbackOpensNoGesture() {
+        var model = SystemVolumeModel()
+        seen(&model, 0.30)
+        _ = model.obey(posed: 0.30, shown: 0.30, now: 100)
+        model.returned(at: 100.054)
+        #expect(!model.opensGesture(at: 100.065))
+        #expect(model.opensGesture(at: 103))
+    }
+
     /// 29/10, 15:11:49 → 15:11:53 : un push tardif fait perdre au rendu son
     /// écart de confirmation hors commande (0,321 → 0,3205). iOS l'ignore et
     /// engage encore depuis 0,321 à 0,431.
