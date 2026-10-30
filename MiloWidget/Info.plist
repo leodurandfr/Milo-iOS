@@ -11,7 +11,7 @@
 	<string>Le widget a besoin d'accéder au réseau local pour communiquer avec Milo.</string>
 	<key>UIAppFonts</key>
 	<array>
-		<string>Fonts/SpaceMono-Regular.ttf</string>
+		<string>SpaceMono-Regular.ttf</string>
 	</array>
 	<key>NSExtension</key>
 	<dict>

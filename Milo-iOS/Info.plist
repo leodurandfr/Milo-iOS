@@ -25,6 +25,10 @@
 		</dict>
 	</dict>
 #endif
+	<key>UIAppFonts</key>
+	<array>
+		<string>NeueMontreal-Medium.otf</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -92,7 +92,7 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         
         // Titre
         titleLabel = UILabel()
-        titleLabel.text = "Milo n'est pas disponible"
+        titleLabel.text = String(localized: "errorUnavailableTitle")
         titleLabel.textAlignment = .center
         titleLabel.font = UIFont(name: "NeueMontreal-Medium", size: 18) ?? .systemFont(ofSize: 18, weight: .medium)
         titleLabel.textColor = UIColor(red: 0x76/255.0, green: 0x7C/255.0, blue: 0x76/255.0, alpha: 1.0)
@@ -104,7 +104,7 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         
         // Message
         messageLabel = UILabel()
-        messageLabel.text = "Assurez-vous d'être connecté sur le même réseau local."
+        messageLabel.text = String(localized: "errorUnavailableMessage")
         messageLabel.textAlignment = .center
         messageLabel.numberOfLines = 0
         messageLabel.font = UIFont(name: "NeueMontreal-Medium", size: 16) ?? .systemFont(ofSize: 16, weight: .medium)
@@ -397,6 +397,22 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         isConnected = false
 
         // Connexion échouée - masquer l'overlay de reconnexion et afficher l'erreur
+        hideReconnectingOverlay()
+        showErrorView()
+    }
+
+    /// L'échec qui survient *après* que la réponse a commencé d'arriver (page
+    /// coupée en cours de chargement) passe ici, et non par
+    /// `didFailProvisionalNavigation`. Sans ce délégué, ni `didFinish` ni aucun
+    /// chemin d'échec ne tournait : `isConnected` restait vrai et l'overlay de
+    /// reconnexion, posé par `enterBackground`, restait affiché au retour.
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        // Même traitement que l'échec provisoire, annulation comprise.
+        if (error as NSError).code == NSURLErrorCancelled { return }
+
+        hasCompletedFirstLoad = true
+        isConnected = false
+
         hideReconnectingOverlay()
         showErrorView()
     }
