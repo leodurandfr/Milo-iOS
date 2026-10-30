@@ -506,19 +506,31 @@ extension MiloAPIClient {
 /// Ce qui marche, c'est de retenir la tentative en vol : le second appelant la
 /// rejoint au lieu d'en ouvrir une seconde, puis exécute la sienne — qui relit
 /// la consigne que le premier vient d'écrire et s'arrête sans rien envoyer.
+///
+/// Attendre une seule fois ne sérialisait que deux appelants. Avec un troisième
+/// — dans le widget, `pushTokenDidChange` et plusieurs `getTimeline` peuvent
+/// tomber ensemble —, B et C attendaient tous deux la tentative de A et
+/// repartaient ensemble à sa fin ; si A n'avait rien consigné (Milō
+/// injoignable), ils envoyaient chacun le même POST. D'où la boucle : on ne part
+/// que lorsque plus personne n'est en vol, et l'acteur garantit qu'entre la
+/// sortie de la boucle et la pose de `inFlight` aucun autre appelant ne passe.
 private actor WidgetTokenRegistrar {
     static let shared = WidgetTokenRegistrar()
 
     private var inFlight: Task<Void, Never>?
 
     func register(_ token: Data) async {
-        if let current = inFlight {
+        while let current = inFlight {
             await current.value
         }
         let task = Task { await Self.perform(token) }
         inFlight = task
         await task.value
-        inFlight = nil
+        // Seulement si c'est encore la nôtre : effacer celle d'un autre
+        // laisserait le suivant partir pendant qu'elle est encore sur le réseau.
+        if inFlight == task {
+            inFlight = nil
+        }
     }
 
     /// Lit la consigne, interroge Milō, écrit le verdict.
@@ -552,9 +564,12 @@ private actor WidgetTokenRegistrar {
 extension Data {
     /// L'inverse de `map { String(format: "%02x", $0) }.joined()`, qui est la
     /// forme sous laquelle un token voyage partout ici.
+    ///
+    /// Chaque caractère est vérifié d'abord : `UInt8(_:radix:)` accepte un signe
+    /// en tête, si bien que « +f » passait pour l'octet 0x0f.
     init?(hexString: String) {
         let characters = Array(hexString)
-        guard characters.count % 2 == 0 else { return nil }
+        guard characters.count % 2 == 0, characters.allSatisfy(\.isHexDigit) else { return nil }
         var bytes = [UInt8]()
         bytes.reserveCapacity(characters.count / 2)
         for index in stride(from: 0, to: characters.count, by: 2) {

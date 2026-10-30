@@ -18,8 +18,6 @@ struct RenderedLevelTests {
 
         // La démonstration de pourquoi : le système multiplie, et zéro absorbe
         // tout facteur. Sans plancher, aucune poignée ne remonte le son.
-        let inerte = 0.0 * 2.0
-        #expect(inerte == 0)
         #expect(MiloAPIClient.renderedLevel(0) * 2 > 0)
     }
 
@@ -488,6 +486,106 @@ struct TrackIDTests {
         #expect(C.transport(.previous).name(forSource: "spotify") == "prev")
         #expect(C.seek(to: 12).name(forSource: "podcast") == "seek")
         #expect(C.skip(by: -15).name(forSource: "podcast") == "skip")
+    }
+}
+
+/// Ce qui part sur le réseau pour chaque bouton de l'écran verrouillé, et ce
+/// qu'on a le droit de rejouer après un délai dépassé. Un délai dépassé ne dit
+/// pas que Milō n'a rien fait : rejouer un `next` saute deux stations, rejouer
+/// un +30 saute 60 s, pour un seul appui.
+struct ControlCommandTests {
+
+    typealias C = MiloAPIClient.ControlCommand
+
+    @Test("Ce qui dépend du nombre d'appuis n'est jamais rejoué")
+    func countedCommandsAreNeverRetried() {
+        let counted: [C] = [.transport(.next), .transport(.previous), .transport(.playPause),
+                            .skip(by: 30), .skip(by: -15)]
+        for command in counted {
+            #expect(!command.isIdempotent, "\(command) serait rejoué")
+        }
+    }
+
+    @Test("Une position absolue ou un état visé se rejoue sans dommage")
+    func absoluteCommandsMayBeRetried() {
+        let absolute: [C] = [.transport(.play), .transport(.pause), .seek(to: 42)]
+        for command in absolute {
+            #expect(command.isIdempotent, "\(command) ne serait pas rejoué")
+        }
+    }
+
+    @Test("Le corps porte le nom que la source attend, pour chaque source")
+    func bodyNamesFollowTheSource() {
+        for source in MiloSourceCard.sources.keys {
+            #expect(C.transport(.next).body(forSource: source)?["command"] as? String == "next")
+            #expect(C.transport(.previous).body(forSource: source)?["command"] as? String == "prev")
+            let pause = C.transport(.pause).body(forSource: source)?["command"] as? String
+            #expect(pause == (source == "radio" ? "stop" : "pause"))
+            let playPause = C.transport(.playPause).body(forSource: source)
+            #expect((playPause == nil) == (source == "radio"))
+        }
+    }
+
+    @Test("Milō reçoit des millisecondes pour un seek, des secondes signées pour un skip")
+    func seekAndSkipCarryTheirUnits() {
+        let seek = C.seek(to: 12.5).body(forSource: "podcast")
+        #expect(seek?["command"] as? String == "seek")
+        #expect((seek?["data"] as? [String: Any])?["position_ms"] as? Int == 12_500)
+
+        let skip = C.skip(by: -15).body(forSource: "podcast")
+        #expect(skip?["command"] as? String == "skip")
+        #expect((skip?["data"] as? [String: Any])?["seconds"] as? Double == -15)
+    }
+
+    @Test("Une valeur non finie ne fabrique aucun corps")
+    func nonFiniteValuesAreGuarded() {
+        // `Int(.nan * 1000)` ferait planter le processus, et `JSONSerialization`
+        // lèverait une exception Objective-C sur un infini : rien ne doit partir.
+        #expect(C.seek(to: .nan).body(forSource: "podcast") == nil)
+        #expect(C.seek(to: .infinity).body(forSource: "podcast") == nil)
+        #expect(C.skip(by: .nan).body(forSource: "podcast") == nil)
+        #expect(C.skip(by: -.infinity).body(forSource: "podcast") == nil)
+    }
+
+    @Test("Un corps fabriqué passe toujours la sérialisation")
+    func everyBodySerializes() throws {
+        let commands: [C] = [.transport(.play), .transport(.next), .seek(to: 3.25), .skip(by: 30)]
+        for command in commands {
+            let body = try #require(command.body(forSource: "podcast"))
+            #expect(JSONSerialization.isValidJSONObject(body))
+        }
+    }
+}
+
+/// La forme sous laquelle un token voyage partout ici — app group, URL de
+/// retrait, file d'attente du token de session — et le chemin du retour.
+struct HexTokenTests {
+
+    func hex(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
+    }
+
+    @Test("Un token fait l'aller-retour octet pour octet")
+    func roundTrips() {
+        let token = Data((0...255).map { UInt8($0) })
+        #expect(Data(hexString: hex(token)) == token)
+        #expect(Data(hexString: "00ff10ab") == Data([0x00, 0xff, 0x10, 0xab]))
+        #expect(Data(hexString: "00FF10AB") == Data([0x00, 0xff, 0x10, 0xab]))
+    }
+
+    @Test("Une entrée malformée ne donne pas de token")
+    func malformedInputIsRejected() {
+        #expect(Data(hexString: "abc") == nil)
+        #expect(Data(hexString: "zz") == nil)
+        #expect(Data(hexString: "0g") == nil)
+        // `UInt8(_:radix:)` accepte un signe : « +f » passait pour 0x0f.
+        #expect(Data(hexString: "+f") == nil)
+        #expect(Data(hexString: "-0") == nil)
+    }
+
+    @Test("Une chaîne vide donne un token vide, pas un échec")
+    func emptyIsEmpty() {
+        #expect(Data(hexString: "") == Data())
     }
 }
 

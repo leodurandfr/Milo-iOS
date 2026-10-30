@@ -103,7 +103,7 @@ extension MiloAPIClient {
         /// `nil` aussi pour une valeur non finie : `Int(.nan * 1000)` fait
         /// planter le processus, et `JSONSerialization` lève une exception
         /// Objective-C sur un `Double` infini.
-        fileprivate func body(forSource source: String) -> [String: Any]? {
+        func body(forSource source: String) -> [String: Any]? {
             guard let name = name(forSource: source) else { return nil }
             switch self {
             case .transport:
@@ -124,7 +124,7 @@ extension MiloAPIClient {
         /// s'additionnent là où un `seek` calculé depuis le dernier ancrage
         /// viserait deux fois la même seconde — et un +30 dont seule la réponse
         /// s'est perdue ferait donc sauter 60 s pour un seul appui.
-        fileprivate var isIdempotent: Bool {
+        var isIdempotent: Bool {
             switch self {
             case .transport(let command): return command.isIdempotent
             case .seek: return true
@@ -1009,13 +1009,16 @@ private actor VolumeGesture {
 /// la boucle de sondage, qui n'est pas réentrante » — et cet argument a déjà
 /// changé deux fois dans la même journée : l'extension a appelé `cacheArtwork`
 /// depuis `update(_:)`, plusieurs fois par processus et dans des tâches
-/// détachées, puis ne l'a plus appelé du tout. Aujourd'hui seule la boucle de
-/// l'app y touche, et l'acteur est donc théoriquement de trop.
+/// détachées, puis ne l'a plus appelé du tout. Aujourd'hui, deux appelants y
+/// touchent en même temps dans l'app : la boucle de sondage, et le préchargement
+/// des logos de favorites (`primeFavoriteStationArtwork`), lancé dans sa propre
+/// tâche à côté d'elle. L'acteur est donc ce qui sépare leurs mutations.
 ///
-/// Il reste. Deux mutations concurrentes d'un `Dictionary` Swift ne donnent pas
-/// une valeur périmée, elles corrompent la mémoire : c'est une panne dont le
-/// coût ne se compare pas à celui d'un acteur, et une invariante de sûreté n'a
-/// pas à dépendre de la liste des appelants qui existent ce matin.
+/// Il resterait même s'il n'y en avait plus qu'un. Deux mutations concurrentes
+/// d'un `Dictionary` Swift ne donnent pas une valeur périmée, elles corrompent
+/// la mémoire : c'est une panne dont le coût ne se compare pas à celui d'un
+/// acteur, et une invariante de sûreté n'a pas à dépendre de la liste des
+/// appelants qui existent ce matin.
 private actor ArtworkQuarantine {
     static let shared = ArtworkQuarantine()
 
@@ -1336,8 +1339,10 @@ extension MiloAPIClient {
     ///
     /// Elles y déposaient les octets d'origine, donc du WebP pour les images de
     /// station, que le consommateur de `ArtworkRepresentation(data:)` n'affiche
-    /// pas. Comme la vérification de présence ne regarde plus le contenu, ces
-    /// entrées seraient réutilisées pour toujours.
+    /// pas. La vérification de présence ne regardait alors que la taille, et ces
+    /// entrées auraient été réutilisées pour toujours. Elle juge désormais le
+    /// cache sur ses octets d'en-tête (`cacheArtwork`), qui écarteraient aussi
+    /// un WebP ; la purge reste pour le cache que ces versions ont laissé.
     ///
     /// Une purge unique plutôt qu'un suffixe de génération dans le nom de
     /// fichier : le suffixe abandonnerait un orphelin par pochette dans le
