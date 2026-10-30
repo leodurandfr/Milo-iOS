@@ -62,7 +62,12 @@ enum MiloScopedHTTP {
     /// changer depuis que l'app l'a notée.
     ///
     /// Le délai de la requête est partagé entre les deux essais : l'appelant
-    /// l'a réglé sur le budget de son rappel, et on ne le dépasse pas.
+    /// l'a réglé sur le budget de son rappel, et on ne le dépasse pas. Une
+    /// seule échéance pour tous : le premier essai n'en prend que la moitié
+    /// quand un second hôte attend, et chaque essai suivant reçoit tout ce qui
+    /// reste. Une IP qui refuse en quelques millisecondes laisse ainsi presque
+    /// tout le budget à `milo.local`, dont la résolution mDNS est l'étape lente
+    /// — un partage fixe lui en retirait la moitié pour rien.
     ///
     /// Une requête qui n'est pas un GET ne passe au second hôte que si elle
     /// n'est jamais partie vers le premier. Les deux hôtes sont le même Pi :
@@ -81,10 +86,14 @@ enum MiloScopedHTTP {
         let hosts = [cachedIP, "milo.local"].compactMap { $0 }.filter { !$0.isEmpty }
         let total = request.timeoutInterval > 0 ? min(request.timeoutInterval, 10) : 3
 
+        let deadline = Date().addingTimeInterval(total)
         var lastError: Error = URLError(.cannotConnectToHost)
         for (index, host) in hosts.enumerated() {
             let isLast = index == hosts.count - 1
-            let timeout = isLast ? total / Double(index + 1) : total / 2
+            let remaining = deadline.timeIntervalSinceNow
+            // Plus rien à donner : l'erreur de l'essai précédent fait foi.
+            guard remaining > 0.05 else { break }
+            let timeout = isLast ? remaining : min(remaining, total / 2)
             let start = Date()
             do {
                 let response = try await send(method: request.httpMethod ?? "GET",
@@ -144,49 +153,66 @@ enum MiloScopedHTTP {
         let payload = request
         let queue = DispatchQueue(label: "milo.scoped-http")
         let exchange = Exchange()
-        let raw: Data = try await withCheckedThrowingContinuation { continuation in
-            @Sendable func finish(_ result: Result<Data, Error>) {
-                guard exchange.close() else { return }
-                connection.cancel()
-                continuation.resume(with: result)
-            }
+        // Une tâche annulée — sonde remplacée par `networkChanged()`, pochette
+        // abandonnée — ferme la connexion tout de suite plutôt qu'à l'expiration
+        // du délai : elle ne garde ni le Wi-Fi ni le processus pour une réponse
+        // que personne ne lira.
+        let raw: Data = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                @Sendable func finish(_ result: Result<Data, Error>) {
+                    guard exchange.close() else { return }
+                    connection.cancel()
+                    continuation.resume(with: result)
+                }
 
-            @Sendable func receive() {
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { chunk, _, complete, error in
-                    let received = exchange.append(chunk)
-                    // Une fermeture rend ce qu'on a, erreur comprise : c'est
-                    // `parse` qui juge si le corps est entier.
-                    if complete || Self.isComplete(received) {
-                        finish(.success(received))
-                    } else if let error {
-                        finish(.failure(Failure.connection(error, sent: exchange.sent)))
-                    } else {
-                        receive()
+                // Posé avant `start` : une annulation arrivée plus tôt — y compris
+                // avant même ce bloc — le déclenche aussitôt, et la connexion
+                // n'est alors jamais lancée.
+                guard exchange.whenCancelled({ finish(.failure(URLError(.cancelled))) }) else {
+                    return
+                }
+
+                @Sendable func receive() {
+                    connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { chunk, _, complete, error in
+                        let received = exchange.append(chunk)
+                        // Une fermeture rend ce qu'on a, erreur comprise : c'est
+                        // `parse` qui juge si le corps est entier.
+                        if complete || Self.isComplete(received) {
+                            finish(.success(received))
+                        } else if let error {
+                            finish(.failure(Failure.connection(error, sent: exchange.sent)))
+                        } else {
+                            receive()
+                        }
                     }
                 }
-            }
 
-            connection.stateUpdateHandler = { state in
-                exchange.note(state)
-                switch state {
-                case .ready:
-                    exchange.markSent()
-                    connection.send(content: payload, completion: .contentProcessed { error in
-                        if let error { finish(.failure(Failure.connection(error, sent: exchange.sent))) }
-                    })
-                    receive()
-                case .failed(let error):
-                    finish(.failure(Failure.connection(error, sent: exchange.sent)))
-                default:
-                    // `waiting` compris : un chemin refusé attend, et c'est le
-                    // délai qui tranche — l'état noté dit alors pourquoi.
-                    break
+                connection.stateUpdateHandler = { state in
+                    exchange.note(state)
+                    switch state {
+                    case .ready:
+                        exchange.markSent()
+                        connection.send(content: payload, completion: .contentProcessed { error in
+                            if let error { finish(.failure(Failure.connection(error, sent: exchange.sent))) }
+                        })
+                        receive()
+                    case .failed(let error):
+                        finish(.failure(Failure.connection(error, sent: exchange.sent)))
+                    default:
+                        // `waiting` compris : un chemin refusé attend, et c'est le
+                        // délai qui tranche — l'état noté dit alors pourquoi.
+                        break
+                    }
                 }
+                queue.asyncAfter(deadline: .now() + timeout) {
+                    finish(.failure(Failure.timedOut(exchange.lastState, sent: exchange.sent)))
+                }
+                connection.start(queue: queue)
             }
-            queue.asyncAfter(deadline: .now() + timeout) {
-                finish(.failure(Failure.timedOut(exchange.lastState, sent: exchange.sent)))
-            }
-            connection.start(queue: queue)
+        } onCancel: {
+            // N'importe quel fil : `Exchange` arbitre sous verrou, et `finish`
+            // ne reprend la continuation qu'une fois.
+            exchange.cancel()
         }
         return try parse(raw)
     }
@@ -200,6 +226,8 @@ enum MiloScopedHTTP {
         private var received = Data()
         private var state = "setup"
         private var requestSent = false
+        private var cancelled = false
+        private var cancelHandler: (@Sendable () -> Void)?
 
         var lastState: String { lock.withLock { state } }
         var sent: Bool { lock.withLock { requestSent } }
@@ -215,10 +243,34 @@ enum MiloScopedHTTP {
             }
         }
 
+        /// Retient de quoi finir sur annulation, ou le fait tout de suite si
+        /// la tâche est déjà annulée — faux dans ce cas.
+        func whenCancelled(_ handler: @escaping @Sendable () -> Void) -> Bool {
+            let already = lock.withLock { () -> Bool in
+                if !cancelled { cancelHandler = handler }
+                return cancelled
+            }
+            if already { handler() }
+            return !already
+        }
+
+        /// Le rappel part hors verrou : `finish` reprend lui-même le verrou.
+        func cancel() {
+            let handler = lock.withLock { () -> (@Sendable () -> Void)? in
+                cancelled = true
+                defer { cancelHandler = nil }
+                return cancelHandler
+            }
+            handler?()
+        }
+
         /// Vrai pour le seul premier appelant.
+        ///
+        /// Lâche au passage le rappel d'annulation : il tient `finish`, qui
+        /// tient cet objet, et le cycle survivrait à la requête.
         func close() -> Bool {
             lock.withLock {
-                defer { finished = true }
+                defer { finished = true; cancelHandler = nil }
                 return !finished
             }
         }

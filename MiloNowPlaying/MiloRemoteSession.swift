@@ -80,6 +80,9 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
     private var miloReachable: Bool
 
     @ObservationIgnored private var reachabilityProbe: Task<Void, Never>?
+    /// La boucle sur `pushTokenUpdates` : sans fin d'elle-même, elle est
+    /// annulée avec la session — voir `deinit`.
+    @ObservationIgnored private var pushTokenObservation: Task<Void, Never>?
     @ObservationIgnored private var reachableConfirmedAt = Date.distantPast
     @ObservationIgnored private let wifiMonitor = NWPathMonitor(requiredInterfaceType: .wifi)
 
@@ -126,6 +129,10 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
 
     deinit {
         wifiMonitor.cancel()
+        // Le processus vit parfois plus d'une heure, et `session(_:)` y
+        // construit une session à chaque réveil : chacune laissait sa boucle
+        // attendre un token qui ne viendra plus.
+        pushTokenObservation?.cancel()
     }
 
     /// Le système remet ici les attributs poussés par Milō. Les stocker suffit :
@@ -878,15 +885,18 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         // que `sessionID`, donc il ne capture rien d'autre.
         let sessionID = id
         let updates = pushTokenUpdates
-        Task {
+        pushTokenObservation = Task {
             for await token in updates {
                 // Par la garde, comme les autres. Sans elle ce flux redéposait
                 // le même token à chaque réveil — deux POST par changement de
                 // station, mesurés dans le journal de Milō — et chacun pris sur
                 // les quelques millisecondes que vit ce processus.
-                guard Self.lastRegistered != Self.stamp(sessionID, token) else { continue }
+                guard Self.claim(Self.stamp(sessionID, token)) else { continue }
                 MiloAPIClient.notePendingSessionToken(token, sessionID: sessionID)
-                await Self.register(token, for: sessionID, occasion: "rotation")
+                // Dans une tâche à part : annuler la boucle avec la session ne
+                // doit pas couper un envoi déjà parti — le transport lié au
+                // Wi-Fi obéit désormais à l'annulation.
+                Task { await Self.register(token, for: sessionID, occasion: "rotation") }
             }
         }
     }
@@ -904,7 +914,7 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                 """)
             return
         }
-        guard Self.lastRegistered != Self.stamp(sessionID, token) else { return }
+        guard Self.claim(Self.stamp(sessionID, token)) else { return }
 
         // Déposé pour l'app **avant** toute tentative réseau, et de façon
         // synchrone : c'est la seule branche qui aboutisse à coup sûr dans un
@@ -928,6 +938,9 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                                              occasion: String) async {
         let outcome = await MiloAPIClient.registerPushToken(
             token, kind: .session, sessionID: sessionID)
+        // `lastRegistered` est écrit avant que la paire quitte `registering` :
+        // entre les deux, aucune garde ne la laisse repartir.
+        defer { release(stamp(sessionID, token)) }
         switch outcome {
         case .registered:
             lastRegistered = stamp(sessionID, token)
@@ -961,6 +974,34 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
                 .string(forKey: MiloAPIClient.sessionTokenStampKey) }
         set { UserDefaults(suiteName: MiloAPIClient.appGroupID)?
                 .set(newValue, forKey: MiloAPIClient.sessionTokenStampKey) }
+    }
+
+    /// Les paires dont l'envoi est en cours, dans ce processus.
+    ///
+    /// `lastRegistered` n'est écrit qu'au retour du POST : d'ici là, l'`init`,
+    /// le premier token du flux et un `update` passaient tous trois la garde et
+    /// postaient chacun la même paire — nginx en a encore noté deux dans la
+    /// même seconde le 28/10/2026 à 23:26:20. Rien à garder d'un processus à
+    /// l'autre : un envoi en cours meurt avec le sien.
+    nonisolated(unsafe) private static var registering: Set<String> = []
+    nonisolated private static let registeringLock = NSLock()
+
+    /// Vrai si l'envoi de cette paire revient à l'appelant : ni déjà abouti,
+    /// ni déjà en route. La paire est alors réservée jusqu'à `release`.
+    nonisolated private static func claim(_ stamp: String) -> Bool {
+        registeringLock.lock()
+        defer { registeringLock.unlock() }
+        guard lastRegistered != stamp, !registering.contains(stamp) else { return false }
+        registering.insert(stamp)
+        return true
+    }
+
+    /// Rend la paire : un échec doit pouvoir être rejoué au passage suivant,
+    /// et un succès est désormais tenu par `lastRegistered`.
+    nonisolated private static func release(_ stamp: String) {
+        registeringLock.lock()
+        registering.remove(stamp)
+        registeringLock.unlock()
     }
 
     /// Le couple (session, token) : c'est leur *paire* qui doit changer pour
