@@ -9,9 +9,11 @@ import WidgetKit
 ///
 /// Le push reste budgété par Apple à la journée et livré de façon opportuniste :
 /// il s'ajoute aux timelines, il ne les remplace pas. `MiloTimelineProvider`
-/// garde donc sa politique de repli — Milō ne notifie que les changements
-/// affichables (source, titre, artiste, état de lecture), et surtout pas le
-/// volume, qui bougerait bien trop souvent pour ce budget.
+/// garde donc sa politique de repli — Milō ne pousse que quand le logo change
+/// d'état, allumé ou atténué (Milō joignable, `any_volume_control`), plus un
+/// premier push après chaque redémarrage. Jamais sur un changement de morceau
+/// ni de volume : le widget n'affiche pas le morceau, et le volume bougerait
+/// bien trop souvent pour ce budget.
 @available(iOS 26.0, *)
 struct MiloWidgetPushHandler: WidgetPushHandler {
 

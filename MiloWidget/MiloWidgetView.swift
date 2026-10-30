@@ -69,6 +69,9 @@ struct MiloWidgetView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
                 .buttonStyle(.plain)
+                // Sans libellé, VoiceOver lit le nom de l'image (« MinusIcon »),
+                // ni traduit ni parlant.
+                .accessibilityLabel(String(localized: "volumeDown"))
 
                 Button(intent: IncreaseVolumeIntent()) {
                     Image("PlusIcon")
@@ -82,6 +85,7 @@ struct MiloWidgetView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "volumeUp"))
             }
             .frame(maxHeight: .infinity)
         }
