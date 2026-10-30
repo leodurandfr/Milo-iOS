@@ -309,15 +309,29 @@ extension MiloAPIClient {
 
     /// Le global tel que Milō le tient, 0…1 — `global_volume`, la moyenne
     /// des enceintes que la carte représente. Court : il précède l'écriture
-    /// d'un rappel, que `mediaremoted` n'attend que trois secondes.
-    static func currentGlobalVolume(timeout: TimeInterval = 0.5) async -> Double? {
+    /// d'un rappel, et les deux tiennent ensemble dans les trois secondes
+    /// que `mediaremoted` accorde (`globalWriteTimeout`).
+    ///
+    /// Rien quand Milō ne compte aucune enceinte : `global_volume` vaut alors
+    /// son niveau par défaut, sans rapport avec ce que jouaient les enceintes
+    /// (tous les clients qui se reconnectent ensemble, par exemple).
+    static func currentGlobalVolume(timeout: TimeInterval = 0.4) async -> Double? {
         guard let data = try? await get(path: "/api/volume/state", timeout: timeout),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let payload = json["data"] as? [String: Any],
-              let level = (payload["global_volume"] as? NSNumber)?.doubleValue
+              let level = (payload["global_volume"] as? NSNumber)?.doubleValue,
+              let clients = payload["clients"] as? [String: [String: Any]],
+              clients.values.contains(where: {
+                  $0["available"] as? Bool ?? true && $0["volume_control"] as? Bool ?? true
+              })
         else { return nil }
         return min(max(level, 0), 1)
     }
+
+    /// Ce que l'écriture d'un rappel peut prendre : avec la relecture (0,4 s),
+    /// moins que les trois secondes au-delà desquelles `mediaremoted`
+    /// abandonne le rappel et l'extension avec.
+    static let globalWriteTimeout: TimeInterval = 2.5
 
     /// Un rappel de la carte : le global, en absolu, au niveau qu'iOS attend
     /// (`SystemVolumeModel.obey`).
@@ -330,7 +344,7 @@ extension MiloAPIClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = "PATCH"
-        request.timeoutInterval = 3
+        request.timeoutInterval = globalWriteTimeout
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(
@@ -959,6 +973,8 @@ private actor VolumeGesture {
     /// le dernier niveau écrit avec son heure.
     private var target: Double?
     private var writer: Task<Bool, Never>?
+    /// La lecture du dernier rappel arrivé : le suivant l'attend.
+    private var intake: Task<Void, Never>?
     private var written: (level: Double, at: TimeInterval)?
 
     /// Un doigt immobile : iOS rappelle toutes les ~65 ms à quelques
@@ -989,22 +1005,34 @@ private actor VolumeGesture {
         // oublier l'affichage d'où iOS était parti, et l'appui redevenait un
         // doigt écrit en absolu.
         let now = Date().timeIntervalSince1970
-        var reported = reported
-        // Le niveau de Milō, relu au début d'un geste : celui des attributs ne
-        // vaut que ce que vaut le dernier push, et le 30/10 aucun n'arrivait
-        // plus — un appui reconnu serait parti du plancher au lieu du volume
-        // monté sur Milo-Mac. Un aller-retour sur le LAN, une fois par geste ;
-        // en cas d'échec, on garde celui des attributs.
-        if SystemVolumeModel.update({ $0.opensGesture(at: now) }),
-           let fresh = await MiloAPIClient.currentGlobalVolume() {
-            if abs(fresh - reported) > SystemVolumeModel.step {
-                MiloAPIClient.trace?("Milō relu à \(Self.rounded(fresh)), carte à \(Self.rounded(reported))")
+
+        // À la file : la relecture suspend l'acteur, et un rappel arrivé
+        // pendant ce temps aurait pu passer `obey` avant celui-ci — qui se
+        // serait alors lu « doigt », dans le sillage de l'autre. Chacun
+        // attend que le précédent ait été lu.
+        let previous = intake
+        let reading = Task { () -> SystemVolumeModel.Command in
+            await previous?.value
+            var reported = reported
+            // Le niveau de Milō, relu au début d'un geste : celui des
+            // attributs ne vaut que ce que vaut le dernier push, et le 30/10
+            // aucun n'arrivait plus — un appui reconnu serait parti du
+            // plancher au lieu du volume monté sur Milo-Mac. Un aller-retour
+            // sur le LAN, une fois par geste ; en cas d'échec, on garde celui
+            // des attributs.
+            if SystemVolumeModel.update({ $0.opensGesture(at: now) }),
+               let fresh = await MiloAPIClient.currentGlobalVolume() {
+                if abs(fresh - reported) > SystemVolumeModel.step {
+                    MiloAPIClient.trace?("Milō relu à \(Self.rounded(fresh)), carte à \(Self.rounded(reported))")
+                }
+                reported = fresh
             }
-            reported = fresh
+            return SystemVolumeModel.update {
+                $0.obey(posed: posed, shown: shown, reported: reported, now: now)
+            }
         }
-        let command = SystemVolumeModel.update {
-            $0.obey(posed: posed, shown: shown, reported: reported, now: now)
-        }
+        intake = Task { _ = await reading.value }
+        let command = await reading.value
         MiloAPIClient.trace?(command.summary)
 
         // Posé avant le réseau : un push parti avant l'écriture ne doit pas
