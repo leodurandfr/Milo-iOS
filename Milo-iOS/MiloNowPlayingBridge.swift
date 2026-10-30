@@ -210,6 +210,8 @@ enum MiloNowPlayingBridge {
     /// avant de commencer. `refresh()` n'est jamais réentrant.
     static func startPump() {
         let previous = pump
+        let returning = backgrounded
+        backgrounded = false
         // Annulée ici, de façon synchrone, et pas depuis la nouvelle tâche : un
         // `stopPump()` immédiat annulerait celle-ci avant qu'elle n'exécute sa
         // première ligne, et l'ancienne boucle tournerait alors pour toujours.
@@ -237,6 +239,16 @@ enum MiloNowPlayingBridge {
             // plan.
             disowned.removeAll()
 
+            // Ce que la lecture était au retour : voir `mayOpenSession`. Au
+            // retour d'arrière-plan seulement : `sceneDidBecomeActive` suit
+            // aussi un simple passage inactif — Centre de contrôle, centre de
+            // notifications, Face ID — et y oublier une lecture lancée une
+            // seconde plus tôt faisait ouvrir sans attendre Milō.
+            if returning {
+                playingSince = nil
+                playingAtFirstPass = nil
+            }
+
             while !Task.isCancelled {
                 await refresh()
                 try? await Task.sleep(for: .seconds(2))
@@ -251,6 +263,7 @@ enum MiloNowPlayingBridge {
 
     static func stopPump() {
         pump?.cancel()
+        backgrounded = true
         // `pump` n'est **pas** remis à nil : c'est la référence dont le prochain
         // `startPump` a besoin pour attendre que cette boucle-ci ait vraiment
         // rendu la main. L'oublier ici rouvrait la fenêtre de chevauchement à
@@ -322,6 +335,7 @@ enum MiloNowPlayingBridge {
         // les deux secondes partiraient alors à la poubelle — pour toute la
         // durée où l'app reste au premier plan.
         let isPlaying = state.session?.phase == .playing
+        notePlayback(isPlaying)
         guard session != nil || mayOpenSession(isPlaying: isPlaying) else {
             note("aucune session, et rien à ouvrir")
             return
@@ -437,8 +451,47 @@ enum MiloNowPlayingBridge {
     /// « va-t-on ouvrir ? » feraient soit construire pour rien, soit renoncer à
     /// une ouverture légitime.
     private static func mayOpenSession(isPlaying: Bool) -> Bool {
-        !systemHoldsAny && isPlaying
-            && Date().timeIntervalSince(lastStartAttempt) > startRetryDelay
+        guard !systemHoldsAny, isPlaying,
+              Date().timeIntervalSince(lastStartAttempt) > startRetryDelay
+        else { return false }
+        // La lecture jouait déjà au retour : aucun événement de lecture,
+        // donc aucun `start` de Milō ne viendra.
+        if playingAtFirstPass == true { return true }
+        // Elle a démarré sous nos yeux : Milō en envoie un pour ce même
+        // événement. Lui laisser le temps d'arriver.
+        guard let playingSince else { return false }
+        return Date().timeIntervalSince(playingSince) >= miloStartWait
+    }
+
+    /// Vrai au lancement et après chaque passage en arrière-plan
+    /// (`stopPump`) : le prochain `startPump` est un vrai retour.
+    private static var backgrounded = true
+
+    /// Depuis quand la lecture est en cours, vue d'ici ; `nil` sinon.
+    private static var playingSince: Date?
+
+    /// La lecture jouait-elle à la première passe après le retour au
+    /// premier plan ? `nil` tant que cette passe n'a pas lu d'état.
+    private static var playingAtFirstPass: Bool?
+
+    /// Ce que le `start` de Milō met à devenir une session ici : sa fenêtre
+    /// d'une seconde, APNs, puis la construction par l'extension. Mesuré le
+    /// 30/10/2026 : deux secondes de lecture à l'écran (11:34:09,6 → 11:34:11,2
+    /// pour l'envoi).
+    ///
+    /// Au-delà, ouvrir reste nécessaire : un `start` perdu, ou un téléphone
+    /// sans jeton push-to-start chez Milō, laisserait sinon la musique sans
+    /// carte.
+    private static let miloStartWait: TimeInterval = 6
+
+    private static func notePlayback(_ isPlaying: Bool) {
+        if playingAtFirstPass == nil { playingAtFirstPass = isPlaying }
+        if isPlaying {
+            if playingSince == nil { playingSince = Date() }
+        } else {
+            playingSince = nil
+            playingAtFirstPass = false
+        }
     }
 
     /// Ouvre une session quand personne ne l'a fait et que la lecture est en cours.
@@ -466,6 +519,14 @@ enum MiloNowPlayingBridge {
     /// l'app n'a jamais été lancée. Ça couvre le cas où la musique jouait déjà
     /// avant qu'on ouvre l'app — où rien n'ouvrait de session, puisque Milō
     /// n'envoie un `start` que sur un événement de lecture.
+    ///
+    /// **Une lecture lancée app ouverte n'ouvre pas tout de suite**
+    /// (`miloStartWait`). C'est l'événement qui fait partir le `start` de
+    /// Milō, et la garde « le système ne tient rien » ne voit pas un `start`
+    /// encore en route. Le 30/10/2026, radio lancée depuis l'app : `24ABE459`
+    /// ouverte ici, `b37c8445` par Milō 0,3 s après ; Milō a gardé la sienne,
+    /// pour laquelle iOS n'a jamais donné de jeton, et aucun `update` n'est
+    /// plus parti — un volume monté sur Milo-Mac n'a jamais atteint la carte.
     ///
     /// **`isPlaying` reste, et ce n'est pas un oubli depuis que tout état se
     /// dessine (`MiloSourceCard`).** Tout dessiner n'est pas tout ouvrir : Milō
