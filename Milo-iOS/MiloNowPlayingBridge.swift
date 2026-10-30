@@ -214,13 +214,28 @@ enum MiloNowPlayingBridge {
         // `stopPump()` immédiat annulerait celle-ci avant qu'elle n'exécute sa
         // première ligne, et l'ancienne boucle tournerait alors pour toujours.
         previous?.cancel()
-        // Les échecs d'avant l'arrière-plan ne disent rien du réseau d'après :
-        // les compter ferait fermer la carte au premier raté du retour, pendant
-        // que le Wi-Fi se réassocie.
-        unreachablePasses = 0
 
         pump = Task {
             await previous?.value
+
+            // Les échecs d'avant l'arrière-plan ne disent rien du réseau
+            // d'après : les compter ferait fermer la carte au premier raté du
+            // retour, pendant que le Wi-Fi se réassocie. Remis à zéro ici,
+            // après l'ancienne boucle, et pas avant : la passe qu'on vient
+            // d'annuler pouvait encore compter un échec derrière la remise à
+            // zéro, et la nouvelle boucle partait alors à un.
+            unreachablePasses = 0
+
+            // Les sessions écartées aussi. `disowned` ne se vide que sur un
+            // `update` réussi — et une session écartée n'en reçoit plus aucun.
+            // Quand c'est la seule que le système tient, rien ne la reprenait
+            // donc jamais : ni `update`, ni demande d'écran, et `systemHoldsAny`
+            // interdisait d'en ouvrir une autre. La carte restait invisible app
+            // ouverte jusqu'à sa fin. Un refus d'il y a une mise en arrière-plan
+            // ne prouve plus rien ; si la session est vraiment morte, le premier
+            // `update` la refusera de nouveau, une fois par retour au premier
+            // plan.
+            disowned.removeAll()
 
             while !Task.isCancelled {
                 await refresh()
@@ -255,7 +270,18 @@ enum MiloNowPlayingBridge {
         // Ne rien changer si Milō est injoignable : une coupure réseau n'est
         // pas une fin de lecture, et effacer la carte à chaque paquet perdu la
         // ferait clignoter.
-        guard let audioData = try? await MiloAPIClient.get(path: "/api/audio/state") else {
+        let audioData: Data
+        do {
+            audioData = try await MiloAPIClient.get(path: "/api/audio/state")
+        } catch {
+            // Une passe annulée n'a rien appris du réseau : `startPump` et
+            // `stopPump` annulent la boucle en pleine requête, et la requête
+            // échoue alors en `URLError.cancelled`. Comptée comme une absence de
+            // Milō, elle mettait la carte à un seul raté de sa fermeture.
+            if Task.isCancelled || error is CancellationError
+                || (error as? URLError)?.code == .cancelled {
+                return
+            }
             unreachablePasses += 1
             note("pas d'état exploitable depuis Milō")
             await endIfUnreachable()
@@ -289,13 +315,12 @@ enum MiloNowPlayingBridge {
         // de son côté pendant que la vivante, invisible, recevait tout.
         await reconcileSession()
 
-        // **Décider avant de payer.** Construire les attributs coûte deux
-        // requêtes de plus — `/api/volume/state` et `/api/multiroom/state`,
-        // dans `buildDevices` — plus le dépôt de la pochette. Tout état se
-        // dessine désormais, y compris quand personne ne tient de session et
-        // n'en ouvrira, et ces trois requêtes toutes les deux secondes
-        // partiraient alors à la poubelle — pour toute la durée où l'app reste
-        // au premier plan.
+        // **Décider avant de payer.** Construire les attributs coûte une
+        // requête de plus — `/api/volume/state`, dans `buildDevices` — plus le
+        // dépôt de la pochette. Tout état se dessine désormais, y compris quand
+        // personne ne tient de session et n'en ouvrira, et ces requêtes toutes
+        // les deux secondes partiraient alors à la poubelle — pour toute la
+        // durée où l'app reste au premier plan.
         let isPlaying = state.session?.phase == .playing
         guard session != nil || mayOpenSession(isPlaying: isPlaying) else {
             note("aucune session, et rien à ouvrir")
@@ -304,17 +329,6 @@ enum MiloNowPlayingBridge {
 
         let attributes = await buildAttributes(from: state)
 
-        // Ne pousser que ce qui change l'affichage.
-        //
-        // Pousser toutes les deux secondes faisait reconstruire la session à
-        // chaque fois — mesuré, quatre fois en deux secondes — et chaque
-        // reconstruction jette l'objet `Artwork` en cours avec son
-        // téléchargement : la pochette n'avait jamais le temps d'arriver.
-        //
-        // La position n'entre pas dans la signature, délibérément : elle change
-        // en permanence, et `MediaPlaybackSnapshot` porte déjà un horodatage à
-        // partir duquel le système interpole. L'annoncer à chaque seconde ne
-        // dirait rien de plus et coûterait tout.
         // `positionJumped` met à jour son propre suivi, et n'est donc appelé
         // que sur les passes qui construisent vraiment des attributs. Les
         // sorties au-dessus n'en produisent aucun : il n'y a rien à comparer.
@@ -326,10 +340,13 @@ enum MiloNowPlayingBridge {
             await openSession(attributes)
         }
 
-        guard let session else {
-            note("aucune session, et rien à ouvrir")
-            return
-        }
+        // Sans session à ce stade, `openSession` vient d'essayer : la garde du
+        // début de passe ne laisse construire que si l'ouverture est permise.
+        // Il a tracé pourquoi il n'a rien ouvert — refus, session née
+        // entre-temps, sessions illisibles — et c'est précisément ce que la
+        // trace doit garder. La recouvrir ici rendait un `start` refusé
+        // indiscernable d'un `start` jamais tenté.
+        guard let session else { return }
 
         // Ne pousser que ce qui change l'affichage.
         //
@@ -415,8 +432,8 @@ enum MiloNowPlayingBridge {
     /// quoi que ce soit.
     ///
     /// Extraites pour que `refresh()` puisse poser la question avec la seule
-    /// `phase` de `/api/audio/state`, sans payer les deux requêtes de
-    /// `buildDevices`. Une seule définition : deux réponses divergentes à
+    /// `phase` de `/api/audio/state`, sans payer la requête de `buildDevices`
+    /// ni la pochette. Une seule définition : deux réponses divergentes à
     /// « va-t-on ouvrir ? » feraient soit construire pour rien, soit renoncer à
     /// une ouverture légitime.
     private static func mayOpenSession(isPlaying: Bool) -> Bool {
@@ -470,7 +487,7 @@ enum MiloNowPlayingBridge {
         guard mayOpenSession(isPlaying: attributes.isPlaying) else { return }
 
         // `systemHoldsAny` date de `reconcileSession`, d'avant les requêtes de
-        // `buildAttributes` — pochette, volume, multiroom. Un `start` de Milō
+        // `buildAttributes` — pochette, volume. Un `start` de Milō
         // arrivé pendant ce temps a déjà ouvert sa session : ouvrir la nôtre
         // referait les deux sessions du 19/09. La passe suivante l'adoptera.
         // Une énumération qui échoue ne dit pas « aucune session » : elle ne
@@ -591,21 +608,13 @@ enum MiloNowPlayingBridge {
         }
     }
 
-    /// Ferme la session. Milō décide normalement de sa fin, mais une session
-    /// ouverte localement doit pouvoir l'être aussi.
-    static func end() async {
-        guard let session else { return }
-        try? await session.end()
-        self.session = nil
-    }
-
     // MARK: - Construction
 
     /// Les attributs complets, à partir de l'état déjà lu.
     ///
     /// Ne décide pas s'il faut une carte — `refresh()` l'a tranché avant
     /// d'appeler, et c'est tout l'intérêt : cette fonction coûte
-    /// deux requêtes et un dépôt de pochette, et on ne les paie que pour une
+    /// une requête et un dépôt de pochette, et on ne les paie que pour une
     /// session que quelqu'un lira.
     ///
     /// Construits comme Milō construit ses notifications (§9, « Notifications
@@ -696,12 +705,14 @@ enum MiloNowPlayingBridge {
         return formatter
     }()
 
-    /// Un device par client snapcast, avec son vrai nom.
+    /// Un device par client snapcast, sous un nom fixe.
     ///
-    /// Les noms ne sont pas dans `/api/volume/state` — seules les zones y sont
-    /// nommées, si bien que deux enceintes d'une même zone s'appelaient toutes
-    /// deux « Salon ». Ils vivent dans `/api/multiroom/state`, qui n'est plus
-    /// interrogé que pour eux.
+    /// Les noms par pièce ne servent plus : depuis le 12/10/2026, l'extension
+    /// replie ces clients en un seul appareil, `milo-system`, qui porte leur
+    /// moyenne et s'appelle « Milō ». Seuls l'identifiant — pour dédupliquer —
+    /// et le niveau survivent. `/api/multiroom/state`, qui n'était interrogé
+    /// que pour ces noms, ne l'est donc plus : une requête de moins à chaque
+    /// construction, pour une valeur que personne ne lisait.
     ///
     /// Le niveau et le filtre viennent tous deux de `/api/volume/state` : il
     /// porte maintenant `volume` (0…1, normalisé par Milō sur ses propres
@@ -712,40 +723,31 @@ enum MiloNowPlayingBridge {
     /// Reconvertir `volume_db` ici avec des bornes gardées de notre côté est
     /// précisément ce qui faisait diverger l'app ouverte et l'app endormie.
     private static func buildDevices() async -> [MiloSessionAttributes.Device] {
-        async let volumeTask = MiloAPIClient.get(path: "/api/volume/state")
-        async let roomsTask = MiloAPIClient.get(path: "/api/multiroom/state")
-
-        guard let volumeData = try? await volumeTask,
+        guard let volumeData = try? await MiloAPIClient.get(path: "/api/volume/state"),
               let volumeJSON = try? JSONSerialization.jsonObject(with: volumeData) as? [String: Any],
               let payload = volumeJSON["data"] as? [String: Any],
               let clients = payload["clients"] as? [String: [String: Any]]
         else { return [] }
-
-        let rooms = (try? await roomsTask)
-            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-            .flatMap { $0?["clients"] as? [String: [String: Any]] } ?? [:]
 
         return clients.keys.sorted().compactMap { mac -> MiloSessionAttributes.Device? in
             let client = clients[mac]
             guard client?["available"] as? Bool ?? true else { return nil }
             guard client?["volume_control"] as? Bool ?? true else { return nil }
 
-            // Ce qu'on vient de demander l'emporte sur ce que Milō rapporte
-            // pendant quelques secondes : sinon cette boucle repousse un niveau
-            // lu avant l'écriture, et le curseur recule sous le doigt.
-            let level = MiloAPIClient.displayedLevel(
-                optimistic: MiloAPIClient.optimisticLevel(mac: mac),
-                reported: client?["volume"] as? Double ?? 0,
-                confirmed: MiloAPIClient.lastRequestedLevel(mac: mac))
             return MiloSessionAttributes.Device(
                 id: mac,
-                name: rooms[mac]?["name"] as? String ?? "Milō \(mac.suffix(5))",
+                name: "Milō",
                 type: "speaker",
-                // Même règle que `displayedVolume` : deux définitions du
-                // niveau rendu donneraient deux bases au même curseur selon que
-                // l'app est devant ou endormie, et c'est la base qui décide du
-                // facteur que le système applique.
-                volume: Float(level)
+                // Le niveau brut, tel que Milō le pousse (`_devices` côté
+                // Milō). Le rendu — plancher, valeur optimiste, écart de
+                // confirmation — ne se fait qu'une fois, dans l'extension, sur
+                // l'appareil système qui porte la moyenne. Le faire ici,
+                // client par client, décalait cette moyenne selon que l'app
+                // était devant ou endormie : un client à zéro rendu à 0,01
+                // suffisait à dépasser ce que `SystemVolumeModel` tient pour un
+                // changement venu d'ailleurs, et la barre sautait d'un
+                // écrivain à l'autre.
+                volume: Float(client?["volume"] as? Double ?? 0)
             )
         }
     }

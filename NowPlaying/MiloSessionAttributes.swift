@@ -75,7 +75,7 @@ struct MiloSessionAttributes: RemoteMediaSessionAttributes {
     ///
     /// `RemoteMediaSession.update(_:)` refuse des attributs dont l'`id` ne
     /// correspond pas au sien, et une session adoptée porte celui que Milō a
-    /// minté — voir `MiloNowPlayingBridge.adoptExistingSession`. On ne fabrique
+    /// minté — voir `MiloNowPlayingBridge.reconcileSession`. On ne fabrique
     /// donc plus l'identifiant à la source : on le repose sur le chemin.
     func with(id: String) -> MiloSessionAttributes {
         MiloSessionAttributes(
