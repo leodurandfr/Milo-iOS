@@ -36,9 +36,18 @@ extension MiloAPIClient {
     /// |------------------|---------|------------------|
     /// | `808fe546…`      | **200** | `BadDeviceToken` |
     ///
+    /// Le push-to-start suit la même règle : refusé en production le même
+    /// jour, puis déclaré `sandbox`, il a porté le `start` de la session
+    /// `18e3978d` à l'iPhone et à l'iPad, qui ont tous deux rendu leur token de
+    /// session dans la seconde.
+    ///
     /// Déclarés `production`, Milō les voyait refusés au premier push, les
     /// purgeait comme morts, et plus aucun `update` ne partait : la carte
     /// restait sur la première piste, toutes sources confondues.
+    ///
+    /// Calculé une fois par processus : le profil ne change pas sous un binaire
+    /// qui tourne, et l'extension Now Playing n'a pas à le relire à chaque
+    /// enregistrement.
     ///
     /// Jamais deviné : un token de build Debug n'est valide que contre
     /// `api.sandbox.push.apple.com`, et viser le mauvais hôte répond
@@ -58,7 +67,7 @@ extension MiloAPIClient {
     /// pas d'APNs de production : on n'enregistre alors rien du tout. Milō
     /// refuse un enregistrement sans environnement (422), et il a raison — une
     /// valeur inventée coûterait plus cher qu'une absence.
-    static func apsEnvironment() -> String? {
+    static let apsEnvironment: String? = {
         guard let data = embeddedMobileProvision() else {
             #if targetEnvironment(simulator)
             return nil
@@ -94,7 +103,7 @@ extension MiloAPIClient {
         case "production": return "production"
         default: return nil
         }
-    }
+    }()
 
     /// Le profil du bundle courant, puis celui de l'app conteneur en repli.
     ///
@@ -341,7 +350,7 @@ extension MiloAPIClient {
                                   sessionID: String? = nil) async -> PushRegistrationOutcome {
         let hex = token.map { String(format: "%02x", $0) }.joined()
 
-        guard let environment = apsEnvironment() else {
+        guard let environment = apsEnvironment else {
             // Le profil est illisible (simulateur). Rien d'utile à envoyer, et
             // rien qu'un réessai corrigerait sur ce build.
             return .refused("aps-environment illisible")
