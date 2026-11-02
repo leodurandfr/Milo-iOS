@@ -21,48 +21,24 @@ extension MiloAPIClient {
         case widget
         case pushToStart = "push_to_start"
         case session
-
-        /// L'hôte APNs auquel ce token répond — et il ne se déduit **pas** de
-        /// l'entitlement du build.
-        ///
-        /// Mesuré le 19/09/2026 contre le vrai service, depuis le Pi, sur un
-        /// build Debug signé `aps-environment: development` :
-        ///
-        /// | token           | sandbox          | production       |
-        /// |-----------------|------------------|------------------|
-        /// | `widget`        | **200**          | `BadDeviceToken` |
-        /// | `push_to_start` | `BadDeviceToken` | **200**          |
-        /// | `session`       | `BadDeviceToken` | **200**          |
-        ///
-        /// Les deux tokens du framework `NowPlaying` sont donc des tokens de
-        /// **production**, sur un build de développement. Ce n'est pas une
-        /// anomalie : ils ne viennent pas de l'inscription APNs de l'app, mais
-        /// de `mediaremoted`, un démon du système qui n'a qu'une seule identité
-        /// APNs — de production. Les journaux le montrent qui les range sous la
-        /// clé `leodurand.Milo-iOS::pushToStart`, dans le même registre que ceux
-        /// de toutes les autres apps de l'appareil, tous en `production`. Le
-        /// token du widget, lui, vient bien de l'app et suit son entitlement.
-        ///
-        /// Viser le mauvais hôte répond `BadDeviceToken` : un 400 que rien ne
-        /// distingue d'un token malformé ni d'un mauvais topic, et c'est ce qui
-        /// a rendu la panne si coûteuse — la clé, le topic et le type de push
-        /// étaient bons depuis le début.
-        ///
-        /// `production` en dur ne fait courir aucun risque à un build App Store,
-        /// où c'est déjà la seule réponse possible.
-        var apnsEnvironment: String? {
-            switch self {
-            case .widget: return MiloAPIClient.apsEnvironment()
-            case .pushToStart, .session: return "production"
-            }
-        }
     }
 
-    /// Environnement APNs déduit de l'entitlement `aps-environment` du build.
+    /// Environnement APNs déduit de l'entitlement `aps-environment` du build,
+    /// pour les trois familles de tokens.
     ///
-    /// **Ne vaut que pour le token du widget** — le seul que l'app obtienne par
-    /// sa propre inscription APNs, et donc le seul qui suive son entitlement.
-    /// Voir `PushTokenKind.apnsEnvironment` pour les deux autres.
+    /// Les deux tokens du framework `NowPlaying` ont longtemps fait exception :
+    /// sous iOS 27.0, mesuré le 19/09/2026 depuis le Pi sur un build Debug, ils
+    /// ne passaient qu'en **production** (`mediaremoted` les émettait sous sa
+    /// propre identité APNs), et l'app les déclarait ainsi en dur. iOS 27.2 les
+    /// a alignés sur l'entitlement — mesuré le 02/11/2026 sur le même build :
+    ///
+    /// | token de session | sandbox | production       |
+    /// |------------------|---------|------------------|
+    /// | `808fe546…`      | **200** | `BadDeviceToken` |
+    ///
+    /// Déclarés `production`, Milō les voyait refusés au premier push, les
+    /// purgeait comme morts, et plus aucun `update` ne partait : la carte
+    /// restait sur la première piste, toutes sources confondues.
     ///
     /// Jamais deviné : un token de build Debug n'est valide que contre
     /// `api.sandbox.push.apple.com`, et viser le mauvais hôte répond
@@ -365,10 +341,9 @@ extension MiloAPIClient {
                                   sessionID: String? = nil) async -> PushRegistrationOutcome {
         let hex = token.map { String(format: "%02x", $0) }.joined()
 
-        guard let environment = kind.apnsEnvironment else {
+        guard let environment = apsEnvironment() else {
             // Le profil est illisible (simulateur). Rien d'utile à envoyer, et
-            // rien qu'un réessai corrigerait sur ce build. Ne concerne que le
-            // widget : les deux autres familles répondent sans lire de profil.
+            // rien qu'un réessai corrigerait sur ce build.
             return .refused("aps-environment illisible")
         }
 
