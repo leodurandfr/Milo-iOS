@@ -52,6 +52,23 @@ enum MiloSourceCard {
     /// `none`, et une source que la table ne connaît pas encore.
     static let milo = (title: "Milō", icon: "milo")
 
+    /// Le titre d'une piste de CD que rien ne nomme (CD gravé, disque lu hors
+    /// ligne) : son numéro, sous le mot qu'emploie l'écran de Milō
+    /// (`audioSources.cdSource.trackN` dans `frontend/src/locales/french.json`).
+    ///
+    /// **Figé en français pour la même raison que `sources`** : le push de Milō
+    /// construit la même carte sans connaître la langue du téléphone, et
+    /// l'écrit à l'identique (`UNTITLED_CD_TRACK` dans
+    /// `backend/core/push/payloads.py`) — à changer des deux côtés ou pas du
+    /// tout.
+    static func untitledTrack(_ number: Int) -> String { "Morceau \(number)" }
+
+    /// Ce que la carte nomme : la session, sinon la reprise
+    /// (`MiloAudioState.shown`), une piste de CD sans titre sous son numéro.
+    static func shown(for state: MiloAudioState) -> MiloAudioState.Shown? {
+        state.shown(untitledTrack: untitledTrack)
+    }
+
     /// Les commandes qui rendent ce qu'une carte au repos montre — la seule
     /// chose qu'elle puisse encore offrir.
     static let resumeCommands: Set<String> = ["resume", "resume_playback"]
@@ -683,14 +700,14 @@ enum MiloNowPlayingBridge {
     ///   la formule du fil. Sans ancrage (radio, reprise seule), `0` et
     ///   l'heure de construction ;
     /// - la piste vient de la session, sinon de la reprise
-    ///   (`MiloAudioState.shown`), sinon de la carte de la source ou de Milō
+    ///   (`MiloSourceCard.shown`), sinon de la carte de la source ou de Milō
     ///   (`MiloSourceCard`) — la même règle que `build_attributes` côté Milō.
     private static func buildAttributes(from state: MiloAudioState) async -> MiloSessionAttributes {
         let session = state.session
         let anchor = session?.position
 
         var track: MiloSessionAttributes.Track?
-        if let shown = state.shown {
+        if let shown = MiloSourceCard.shown(for: state) {
             // « Connecté à X » : l'émetteur est là, mais Milō ne sait pas dire
             // lecture ou pause. C'est ce que la ligne d'artiste dit alors, avec
             // les noms que le fil publie pour ça.

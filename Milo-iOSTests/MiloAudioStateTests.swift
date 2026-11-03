@@ -20,6 +20,9 @@ private func state(_ partial: String) throws -> MiloAudioState {
     return try MiloAudioState.decode(try JSONSerialization.data(withJSONObject: merged))
 }
 
+/// A label neither app uses: these cases pin the display rule, each app's tests its wording.
+private func untitled(_ number: Int) -> String { "untitled #\(number)" }
+
 struct MiloAudioStateDecodingTests {
 
     @Test("The §1 example decodes whole")
@@ -85,8 +88,8 @@ struct MiloAudioStateDecodingTests {
         """)
         #expect(stopped.session == nil)
         #expect(stopped.resume?.positionMs == nil)
-        #expect(stopped.shown?.title == "FIP")
-        #expect(stopped.shown?.isSession == false)
+        #expect(stopped.shown(untitledTrack: untitled)?.title == "FIP")
+        #expect(stopped.shown(untitledTrack: untitled)?.isSession == false)
     }
 
     @Test("Music Library: the current track id comes out of details")
@@ -109,9 +112,9 @@ struct MiloAudioStateDecodingTests {
         {"source":"cd","availability":{"cd":"unreadable_disc"},"session":null,"controls":["eject"],
          "resume":null,"details":{"kind":"cd","disc":null,"current_track":null,"artwork_pending":false}}
         """)
-        #expect(decoded.shown == nil)
+        #expect(decoded.shown(untitledTrack: untitled) == nil)
         #expect(decoded.controls == ["eject"])
-        #expect(decoded.details == .other(kind: "cd"))
+        #expect(decoded.details == .cd(currentTrack: nil))
     }
 
     @Test("A source change and a failed start carry no session and no controls")
@@ -141,7 +144,7 @@ struct MiloAudioStateDecodingTests {
         """)
         #expect(airplay.session?.phase == .connected)
         #expect(airplay.session?.senders == ["Mac mini de Léo"])
-        #expect(airplay.shown == nil)
+        #expect(airplay.shown(untitledTrack: untitled) == nil)
 
         let mac = try state("""
         {"source":"mac","session":{"id":"6d","phase":"connected","title":null,"artist":null,"album":null,
@@ -211,8 +214,8 @@ struct MiloAudioStateDisplayTests {
         let decoded = try state("""
         {"source":"spotify","session":\(session(title: "Hyperballad")),"controls":[],"resume":null,"details":null}
         """)
-        #expect(decoded.shown?.title == "Hyperballad")
-        #expect(decoded.shown?.isSession == true)
+        #expect(decoded.shown(untitledTrack: untitled)?.title == "Hyperballad")
+        #expect(decoded.shown(untitledTrack: untitled)?.isSession == true)
     }
 
     @Test("With no session, the resume point is shown")
@@ -220,8 +223,8 @@ struct MiloAudioStateDisplayTests {
         let decoded = try state("""
         {"source":"music_library","session":null,"controls":[],"resume":\(resume),"details":null}
         """)
-        #expect(decoded.shown?.title == "Teardrop")
-        #expect(decoded.shown?.isSession == false)
+        #expect(decoded.shown(untitledTrack: untitled)?.title == "Teardrop")
+        #expect(decoded.shown(untitledTrack: untitled)?.isSession == false)
     }
 
     @Test("An empty title names nothing")
@@ -229,7 +232,7 @@ struct MiloAudioStateDisplayTests {
         let decoded = try state("""
         {"source":"spotify","session":\(session(title: "")),"controls":[],"resume":null,"details":null}
         """)
-        #expect(decoded.shown == nil)
+        #expect(decoded.shown(untitledTrack: untitled) == nil)
     }
 
     @Test("Nothing titled, nothing shown")
@@ -237,7 +240,44 @@ struct MiloAudioStateDisplayTests {
         let decoded = try state("""
         {"source":"spotify","session":\(session(title: nil)),"controls":[],"resume":null,"details":null}
         """)
-        #expect(decoded.shown == nil)
+        #expect(decoded.shown(untitledTrack: untitled) == nil)
+    }
+
+    private let cdDetails = """
+    {"kind":"cd","disc":{"id":"d1","album":null,"artist":null,"year":null,"cover_url":null,
+     "tracks":[{"number":3,"title":null,"duration_ms":321000}]},
+     "current_track":3,"artwork_pending":false,"shuffle":false,"repeat":"off"}
+    """
+
+    @Test("A CD track nothing names is shown by its number, under the app's label")
+    func untitledCdTrack() throws {
+        let decoded = try state("""
+        {"source":"cd","session":\(session(title: nil)),"controls":[],"resume":null,"details":\(cdDetails)}
+        """)
+        #expect(decoded.details == .cd(currentTrack: 3))
+        #expect(decoded.shown(untitledTrack: untitled)?.title == "untitled #3")
+        #expect(decoded.shown(untitledTrack: untitled)?.durationMs == 321_000)
+        #expect(decoded.shown(untitledTrack: untitled)?.isSession == true)
+    }
+
+    @Test("With no session, an untitled CD resume point is shown the same way")
+    func untitledCdResume() throws {
+        let decoded = try state("""
+        {"source":"cd","session":null,"controls":["resume"],"details":\(cdDetails),
+         "resume":{"title":null,"artist":null,"album":null,"artwork":null,
+           "duration_ms":321000,"position_ms":0}}
+        """)
+        #expect(decoded.shown(untitledTrack: untitled)?.title == "untitled #3")
+        #expect(decoded.shown(untitledTrack: untitled)?.isSession == false)
+    }
+
+    @Test("A CD track with a title keeps it")
+    func titledCdTrack() throws {
+        let decoded = try state("""
+        {"source":"cd","session":\(session(title: "Hyperballad")),"controls":[],"resume":null,
+         "details":\(cdDetails)}
+        """)
+        #expect(decoded.shown(untitledTrack: untitled)?.title == "Hyperballad")
     }
 }
 

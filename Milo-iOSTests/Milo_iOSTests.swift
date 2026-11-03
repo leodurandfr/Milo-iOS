@@ -409,6 +409,23 @@ struct NowPlayingSourceCardTests {
         """).title == "Milō")
     }
 
+    @Test("Une piste de CD sans titre se nomme « Morceau N », jamais par la carte du lecteur")
+    func anUntitledCdTrackIsNamedByItsNumber() throws {
+        // Un CD gravé, ou lu hors ligne : rien ne nomme la piste, seul
+        // `details.current_track` dit laquelle joue.
+        let cd = try state("""
+        {"source":"cd","controls":["pause","seek","skip","next","prev"],
+         "session":{"id":"c3","phase":"playing","title":null,"artist":null,"album":null,
+           "artwork":null,"senders":[],"duration_ms":245000,
+           "position":{"ms":12000,"at":1790270000.25,"rate":1.0}},
+         "details":{"kind":"cd","disc":{"id":"d1","album":null,"artist":null,"year":null,
+           "cover_url":null,"tracks":[{"number":3,"title":null,"duration_ms":245000}]},
+           "current_track":3,"artwork_pending":false,"shuffle":false,"repeat":"off"}}
+        """)
+        #expect(MiloSourceCard.shown(for: cd)?.title == "Morceau 3")
+        #expect(MiloSourceCard.shown(for: cd)?.durationMs == 245_000)
+    }
+
     @Test("Une station arrêtée n'offre que la reprise, pas les favorites")
     func aStoppedStationOffersOnlyToResume() throws {
         // La radio garde `next`/`prev` à l'arrêt pour parcourir ses favorites ;

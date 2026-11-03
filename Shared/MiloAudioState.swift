@@ -152,6 +152,8 @@ struct MiloAudioState: Decodable, Sendable, Equatable {
         case radio(station: Station, track: RadioTrack?)
         /// The current track's Subsonic id.
         case musicLibrary(trackId: String?)
+        /// The disc's current track, 1-based: the one playing, or the one play would start.
+        case cd(currentTrack: Int?)
         case other(kind: String)
 
         struct Station: Decodable, Sendable, Equatable {
@@ -171,6 +173,7 @@ struct MiloAudioState: Decodable, Sendable, Equatable {
         private enum CodingKeys: String, CodingKey {
             case kind, station, track
             case trackId = "track_id"
+            case currentTrack = "current_track"
         }
 
         init(from decoder: any Decoder) throws {
@@ -182,6 +185,8 @@ struct MiloAudioState: Decodable, Sendable, Equatable {
                               track: try container.decodeIfPresent(RadioTrack.self, forKey: .track))
             case "music_library":
                 self = .musicLibrary(trackId: try container.decodeIfPresent(String.self, forKey: .trackId))
+            case "cd":
+                self = .cd(currentTrack: try container.decodeIfPresent(Int.self, forKey: .currentTrack))
             default:
                 self = .other(kind: kind)
             }
@@ -194,6 +199,10 @@ struct MiloAudioState: Decodable, Sendable, Equatable {
     /// This is the display rule of both apps (§9: a card exists if `session` or `resume`
     /// carries a `title`), written once so the lock screen and the menu bar cannot
     /// disagree about whether there is something to show.
+    ///
+    /// A CD track nothing names (a burned disc, a disc read offline) is named by its number,
+    /// under the label each app passes as `untitledTrack`: the wording is the app's, the rule
+    /// is this one.
     struct Shown: Sendable, Equatable {
         let title: String
         let artist: String?
@@ -204,13 +213,15 @@ struct MiloAudioState: Decodable, Sendable, Equatable {
         let isSession: Bool
     }
 
-    var shown: Shown? {
-        if let session, let title = Self.nonEmpty(session.title) {
+    func shown(untitledTrack: (Int) -> String) -> Shown? {
+        var untitled: String?
+        if case .cd(let number?) = details { untitled = untitledTrack(number) }
+        if let session, let title = Self.nonEmpty(session.title) ?? untitled {
             return Shown(title: title, artist: Self.nonEmpty(session.artist),
                          album: Self.nonEmpty(session.album), artwork: Self.nonEmpty(session.artwork),
                          durationMs: session.durationMs, isSession: true)
         }
-        if let resume, let title = Self.nonEmpty(resume.title) {
+        if let resume, let title = Self.nonEmpty(resume.title) ?? untitled {
             return Shown(title: title, artist: Self.nonEmpty(resume.artist),
                          album: Self.nonEmpty(resume.album), artwork: Self.nonEmpty(resume.artwork),
                          durationMs: resume.durationMs, isSession: false)
