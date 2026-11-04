@@ -708,14 +708,6 @@ enum MiloNowPlayingBridge {
 
         var track: MiloSessionAttributes.Track?
         if let shown = MiloSourceCard.shown(for: state) {
-            // « Connecté à X » : l'émetteur est là, mais Milō ne sait pas dire
-            // lecture ou pause. C'est ce que la ligne d'artiste dit alors, avec
-            // les noms que le fil publie pour ça.
-            var artist = shown.artist
-            if session?.phase == .connected, let senders = session?.senders, !senders.isEmpty {
-                artist = String(localized: "connectedTo \(senders.joined(separator: ", "))")
-            }
-
             track = MiloSessionAttributes.Track(
                 // L'identifiant change avec ce qui est affiché : sans ça, le
                 // système garde la pochette et le titre précédents, faute de
@@ -723,7 +715,7 @@ enum MiloNowPlayingBridge {
                 // l'extension relit pour adresser ses commandes (`MiloTrackID`).
                 id: MiloTrackID.make(source: state.source, title: shown.title),
                 title: shown.title,
-                artist: artist,
+                artist: shown.artist,
                 album: shown.album,
                 // Millisecondes côté Milō, secondes côté framework ; une durée
                 // inconnue vaut 0, jamais `nil`.
