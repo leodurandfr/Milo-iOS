@@ -277,9 +277,10 @@ final class MiloRemoteSession: @MainActor RemoteMediaSessionRepresentable {
         // `MusicContent` veut des `String` non optionnels alors que Milō peut
         // n'avoir pas encore de métadonnées. Une chaîne vide laisse le système
         // masquer la ligne ; inventer « Inconnu » l'afficherait pour de bon.
+        // Une piste de CD sans titre arrive avec son numéro, et se nomme ici.
         return MusicContent(
             id: Self.contentID(track),
-            songTitle: track.title ?? "",
+            songTitle: track.title ?? track.trackNumber.map { MiloUntitledTrack.title($0) } ?? "",
             artistName: track.artist ?? "",
             albumName: track.album ?? "",
             type: .audio,

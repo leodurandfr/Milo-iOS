@@ -18,6 +18,9 @@ import NowPlaying
 /// - nullables : `title`, `artist`, `album`, `artworkURL`, et `currentTrack`
 ///   lui-même. Une source peut passer ACTIVE avant sa première métadonnée, et le
 ///   Bluetooth n'a jamais de pochette en bande.
+/// - `trackNumber` : seulement pour une piste de CD que rien ne nomme, dont
+///   `title` est alors nul — l'extension la nomme dans la langue du téléphone
+///   (`MiloUntitledTrack`).
 /// - toujours présents : `id`, `isPlaying`, `elapsedTime`, `devices`, et
 ///   `duration` quand une piste est là — une durée inconnue vaut `0.0`, jamais
 ///   `null`.
@@ -45,6 +48,8 @@ struct MiloSessionAttributes: RemoteMediaSessionAttributes {
         let title: String?
         let artist: String?
         let album: String?
+        /// Le numéro d'une piste de CD sans titre ; `nil` dès qu'un titre existe.
+        let trackNumber: Int?
         /// Secondes. Milō convertit depuis les millisecondes de `/api/audio/state`.
         let duration: TimeInterval
         let artworkURL: String?

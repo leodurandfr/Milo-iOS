@@ -52,21 +52,33 @@ enum MiloSourceCard {
     /// `none`, et une source que la table ne connaît pas encore.
     static let milo = (title: "Milō", icon: "milo")
 
-    /// Le titre d'une piste de CD que rien ne nomme (CD gravé, disque lu hors
-    /// ligne) : son numéro, sous le mot qu'emploie l'écran de Milō
-    /// (`audioSources.cdSource.trackN` dans `frontend/src/locales/french.json`).
-    ///
-    /// **Figé en français pour la même raison que `sources`** : le push de Milō
-    /// construit la même carte sans connaître la langue du téléphone, et
-    /// l'écrit à l'identique (`UNTITLED_CD_TRACK` dans
-    /// `backend/core/push/payloads.py`) — à changer des deux côtés ou pas du
-    /// tout.
-    static func untitledTrack(_ number: Int) -> String { "Morceau \(number)" }
-
     /// Ce que la carte nomme : la session, sinon la reprise
-    /// (`MiloAudioState.shown`), une piste de CD sans titre sous son numéro.
+    /// (`MiloAudioState.shown`), une piste de CD sans titre sous son numéro,
+    /// dans la langue du téléphone (`MiloUntitledTrack`).
     static func shown(for state: MiloAudioState) -> MiloAudioState.Shown? {
-        state.shown(untitledTrack: untitledTrack)
+        state.shown(untitledTrack: { MiloUntitledTrack.title($0) })
+    }
+
+    /// Ce que les attributs portent de la piste montrée.
+    struct Named: Equatable {
+        let id: String
+        let title: String?
+        let trackNumber: Int?
+    }
+
+    /// Le titre de la piste montrée ou, pour une piste de CD que rien ne
+    /// nomme, son numéro sans titre : l'extension le nomme dans la langue du
+    /// téléphone. C'est ce que pousse Milō (`payloads.shown_track` dans
+    /// `backend/core/push/payloads.py`), identifiant compris — deux formes de
+    /// la même carte la feraient basculer à chaque aller-retour.
+    static func named(_ shown: MiloAudioState.Shown, in state: MiloAudioState) -> Named {
+        let record = shown.isSession ? state.session?.title : state.resume?.title
+        if case .cd(let number?) = state.details, (record ?? "").isEmpty {
+            return Named(id: MiloTrackID.make(source: state.source, trackNumber: number),
+                         title: nil, trackNumber: number)
+        }
+        return Named(id: MiloTrackID.make(source: state.source, title: shown.title),
+                     title: shown.title, trackNumber: nil)
     }
 
     /// Les commandes qui rendent ce qu'une carte au repos montre — la seule
@@ -708,15 +720,17 @@ enum MiloNowPlayingBridge {
 
         var track: MiloSessionAttributes.Track?
         if let shown = MiloSourceCard.shown(for: state) {
+            let named = MiloSourceCard.named(shown, in: state)
             track = MiloSessionAttributes.Track(
                 // L'identifiant change avec ce qui est affiché : sans ça, le
                 // système garde la pochette et le titre précédents, faute de
                 // savoir que le contenu a changé. Il porte aussi la source, que
                 // l'extension relit pour adresser ses commandes (`MiloTrackID`).
-                id: MiloTrackID.make(source: state.source, title: shown.title),
-                title: shown.title,
+                id: named.id,
+                title: named.title,
                 artist: shown.artist,
                 album: shown.album,
+                trackNumber: named.trackNumber,
                 // Millisecondes côté Milō, secondes côté framework ; une durée
                 // inconnue vaut 0, jamais `nil`.
                 duration: TimeInterval(shown.durationMs ?? 0) / 1000,
@@ -737,6 +751,7 @@ enum MiloNowPlayingBridge {
                 title: card.title,
                 artist: card.artist,
                 album: nil,
+                trackNumber: nil,
                 duration: 0,
                 artworkURL: card.artwork
             )

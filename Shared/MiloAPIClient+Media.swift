@@ -13,12 +13,30 @@ enum MiloTrackID {
         source + ":" + title
     }
 
+    /// Une piste de CD que rien ne nomme : `cd:#3`. Le titre est alors absent
+    /// des attributs, et l'identifiant change quand même à chaque piste.
+    static func make(source: String, trackNumber: Int) -> String {
+        source + ":#" + String(trackNumber)
+    }
+
     /// La source que l'identifiant nomme ; `nil` pour `none`, qui ne reçoit
     /// aucune commande, et pour un identifiant sans préfixe.
     static func source(of id: String) -> String? {
         guard let separator = id.firstIndex(of: ":"), separator > id.startIndex else { return nil }
         let source = String(id[id.startIndex..<separator])
         return source == "none" ? nil : source
+    }
+}
+
+/// Le titre d'une piste de CD que rien ne nomme (CD gravé, disque lu hors
+/// ligne) : son numéro, dans la langue du téléphone, sous le mot qu'emploie
+/// l'écran de Milō (`audioSources.cdSource.trackN`). Milō ne connaît pas cette
+/// langue : il pousse le numéro (`trackNumber`), et l'app comme l'extension le
+/// nomment ici. `bundle` est la localisation lue, celle de la cible par défaut.
+enum MiloUntitledTrack {
+    static func title(_ number: Int, bundle: Bundle = .main) -> String {
+        let format = bundle.localizedString(forKey: "cd.untitledTrack", value: nil, table: nil)
+        return String(format: format, locale: .current, number)
     }
 }
 

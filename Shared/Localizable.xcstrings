@@ -319,6 +319,60 @@
         }
       }
     },
+    "cd.untitledTrack" : {
+      "comment" : "Lock screen title of a CD track nothing names (a burned disc, a disc read offline): its number. Worded as Milō's own screen words it (audioSources.cdSource.trackN).",
+      "extractionState" : "manual",
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Titel %lld"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Track %lld"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pista %lld"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Morceau %lld"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ट्रैक %lld"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Brano %lld"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Faixa %lld"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "曲目 %lld"
+          }
+        }
+      }
+    },
     "errorUnavailableMessage" : {
       "comment" : "App error screen message, under the title.",
       "extractionState" : "manual",

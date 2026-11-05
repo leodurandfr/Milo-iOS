@@ -409,7 +409,12 @@ struct NowPlayingSourceCardTests {
         """).title == "Milō")
     }
 
-    @Test("Une piste de CD sans titre se nomme « Morceau N », jamais par la carte du lecteur")
+    private func localization(_ language: String) throws -> Bundle {
+        let path = try #require(Bundle.main.path(forResource: language, ofType: "lproj"))
+        return try #require(Bundle(path: path))
+    }
+
+    @Test("Une piste de CD sans titre se nomme par son numéro, jamais par la carte du lecteur")
     func anUntitledCdTrackIsNamedByItsNumber() throws {
         // Un CD gravé, ou lu hors ligne : rien ne nomme la piste, seul
         // `details.current_track` dit laquelle joue.
@@ -422,8 +427,39 @@ struct NowPlayingSourceCardTests {
            "cover_url":null,"tracks":[{"number":3,"title":null,"duration_ms":245000}]},
            "current_track":3,"artwork_pending":false,"shuffle":false,"repeat":"off"}}
         """)
-        #expect(MiloSourceCard.shown(for: cd)?.title == "Morceau 3")
+        #expect(MiloSourceCard.shown(for: cd)?.title == MiloUntitledTrack.title(3))
         #expect(MiloSourceCard.shown(for: cd)?.durationMs == 245_000)
+
+        // Les attributs portent le numéro, pas le libellé : l'extension le
+        // nomme dans la langue du téléphone, et Milō pousse la même forme.
+        let shown = try #require(MiloSourceCard.shown(for: cd))
+        #expect(MiloSourceCard.named(shown, in: cd)
+                == MiloSourceCard.Named(id: "cd:#3", title: nil, trackNumber: 3))
+    }
+
+    @Test("Le libellé d'une piste sans titre suit la langue du téléphone")
+    func theUntitledLabelIsLocalized() throws {
+        #expect(MiloUntitledTrack.title(3, bundle: try localization("fr")) == "Morceau 3")
+        #expect(MiloUntitledTrack.title(3, bundle: try localization("en")) == "Track 3")
+        let languages = Bundle.main.localizations.filter { $0 != "Base" }
+        #expect(languages.count >= 8)
+        for language in languages {
+            let title = MiloUntitledTrack.title(3, bundle: try localization(language))
+            #expect(title.contains("3") && !title.contains("cd.untitledTrack"), "\(language): \(title)")
+        }
+    }
+
+    @Test("Une piste de CD titrée garde son titre et l'identifiant qui le porte")
+    func aTitledCdTrackKeepsItsTitle() throws {
+        let cd = try state("""
+        {"source":"cd","session":{"id":"c3","phase":"playing","title":"Hyperballad","artist":null,
+           "album":null,"artwork":null,"senders":[],"duration_ms":245000,"position":null},
+         "details":{"kind":"cd","disc":null,"current_track":3,"artwork_pending":false,
+           "shuffle":false,"repeat":"off"}}
+        """)
+        let shown = try #require(MiloSourceCard.shown(for: cd))
+        #expect(MiloSourceCard.named(shown, in: cd)
+                == MiloSourceCard.Named(id: "cd:Hyperballad", title: "Hyperballad", trackNumber: nil))
     }
 
     @Test("Une station arrêtée n'offre que la reprise, pas les favorites")
